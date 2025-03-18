@@ -1,0 +1,56 @@
+{
+  "backtest": {
+    "start_date": "2020-01-01",
+    "end_date": "2024-12-31",
+    "frequency": "daily"
+  },
+  "portfolio": {
+    "initial_cash": 1000000,
+    "leverage_limit": 1.0,
+    "benchmark": "SPY"
+  },
+  "universe": {
+    "index": "SPY",
+    "random_selection": true,
+    "num_stocks": 1,
+    "seed": 42
+  },
+  "trading": {
+    "commission": {
+      "percentage": 0.0005,
+      "minimum": 1.0
+    },
+    "slippage": {
+      "model": "fixed",
+      "value": 0.0001
+    },
+    "market_impact": {
+      "enabled": false,
+      "factor": 0.1
+    }
+  },
+  "options": {
+    "pricing_model": "black_scholes",
+    "risk_free_rate": 0.02,
+    "min_days_to_expiry": 10,
+    "max_days_to_expiry": 120,
+    "binomial_steps": 100
+  },
+  "dispersion": {
+    "entry_threshold": 0.05,
+    "exit_threshold": 0.02,
+    "max_position_size": 0.1,
+    "min_implied_correlation": 0.3,
+    "max_implied_correlation": 0.8
+  },
+  "logging": {
+    "level": "info",
+    "save_trades": true,
+    "save_positions": true,
+    "save_performance": true
+  },
+  "paths": {
+    "data_dir": "data/processed/",
+    "results_dir": "results/"
+  }
+}
