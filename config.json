@@ -34,7 +34,9 @@
     "risk_free_rate": 0.02,
     "min_days_to_expiry": 10,
     "max_days_to_expiry": 120,
-    "binomial_steps": 100
+    "binomial_steps": 100,
+    "volatility_method": "vix_implied",
+    "volatility_lookback": 30
   },
   "dispersion": {
     "entry_threshold": 0.05,

@@ -9,10 +9,12 @@ import pandas as pd
 from scipy.stats import norm
 from datetime import datetime
 import os
+from .volatility import calculate_vix_implied_volatility
 
 # define the overall function to price the options
 def price_options(ticker, current_date, expiration_date, strike_price, option_type='call', 
-                  model='black_scholes', risk_free_rate=0.02, steps=100):
+                  model='black_scholes', risk_free_rate=0.02, steps=100, 
+                  volatility_method='vix_implied', volatility_value=None):
     """
     Price options using either Black-Scholes or Binomial Tree model
     
@@ -34,6 +36,10 @@ def price_options(ticker, current_date, expiration_date, strike_price, option_ty
         Annual risk-free rate as a decimal, default is 0.02 (2%)
     steps : int, optional
         Number of steps for binomial tree model, default is 100
+    volatility_method : str, optional
+        Method to calculate volatility: 'historical', 'vix_implied', or 'custom'
+    volatility_value : float, optional
+        Custom volatility value to use when volatility_method='custom'
         
     Returns:
     --------
@@ -64,11 +70,22 @@ def price_options(ticker, current_date, expiration_date, strike_price, option_ty
     # Get the current price of the stock
     current_price = data.iloc[-1]['Adjusted']
     
-    # Calculate the daily returns
-    returns = data['Adjusted'].pct_change().dropna()
-    
-    # Calculate the annualized volatility (standard deviation of returns)
-    volatility = returns.std() * np.sqrt(252)
+    # Determine volatility based on method
+    if volatility_method == 'custom' and volatility_value is not None:
+        volatility = volatility_value
+    elif volatility_method == 'vix_implied':
+        try:
+            volatility = calculate_vix_implied_volatility(ticker, current_date)
+        except Exception as e:
+            print(f"Warning: Could not calculate VIX-implied volatility ({e}). Falling back to historical.")
+            # Calculate historical volatility as fallback
+            returns = data['Adjusted'].pct_change().dropna()
+            volatility = returns.std() * np.sqrt(252)
+    else:  # default to historical
+        # Calculate the daily returns
+        returns = data['Adjusted'].pct_change().dropna()
+        # Calculate the annualized volatility
+        volatility = returns.std() * np.sqrt(252)
     
     # Calculate time to expiration in years
     time_to_expiry = (expiration_date - current_date).days / 365.0

@@ -96,8 +96,8 @@ def grab_data(symbols, start_date=None, end_date=None):
         print(f"Error running R script: {e}")
         raise
 
-# Grab data for index ETF
-grab_data(index, start_date, end_date)
+# Grab data for index ETF and VIX
+grab_data(f"{index},^VIX", start_date, end_date)
 
 # Grab data for selected tickers 
 grab_data(",".join(selected_tickers), start_date, end_date)
