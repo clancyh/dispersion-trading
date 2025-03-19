@@ -8,6 +8,7 @@ import random
 import subprocess
 import os
 import json
+from datetime import datetime, timedelta
 
 # Load configuration
 def load_config(config_path='config.json'):
@@ -96,12 +97,18 @@ def grab_data(symbols, start_date=None, end_date=None):
         print(f"Error running R script: {e}")
         raise
 
-# Grab data for index ETF and VIX
-grab_data(f"{index},^VIX", start_date, end_date)
+# Calculate extended start date (2 years before backtest start date)
+backtest_start = datetime.strptime(start_date, '%Y-%m-%d')
+extended_start = (backtest_start - timedelta(days=2*365)).strftime('%Y-%m-%d')
+print(f"Fetching index and VIX data with extended history (from {extended_start} to {end_date})")
 
-# Grab data for selected tickers 
-grab_data(",".join(selected_tickers), start_date, end_date)
+# Grab data for index ETF and VIX with extended history
+grab_data(f"{index},^VIX", extended_start, end_date)
+
+# Grab data for selected tickers (only for the backtest period)
+grab_data(",".join(selected_tickers), extended_start, end_date)
 
 # Data will be saved to data/processed/ directory as CSV files
 print(f"Universe setup complete. Selected tickers: {index} + {len(selected_tickers)} constituents")
-print(f"Date range: {start_date} to {end_date}")
+print(f"Date range for components: {start_date} to {end_date}")
+print(f"Extended date range for index and VIX: {extended_start} to {end_date}")

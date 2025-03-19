@@ -5,12 +5,15 @@ Options Pricing Test Script
 This script tests the options pricing functions using historical SPY data.
 It prices options at different dates with various strikes and expiration dates,
 using both Black-Scholes and Binomial models.
+
+IMPORTANT:
+THIS MIGHT BE BROKEN BECAUSE OF THE PATH, SO FIX IF YOU RUN LATER
 """
 
 import os
 import pandas as pd
 from datetime import datetime, timedelta
-from options_pricer import price_options, black_scholes, binomial_tree
+from backtester.options_pricer import price_options, black_scholes, binomial_tree
 
 def main():
     print("Options Pricing Test Script")

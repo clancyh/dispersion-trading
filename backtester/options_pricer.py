@@ -46,16 +46,26 @@ def price_options(ticker, current_date, expiration_date, strike_price, option_ty
     float
         The price of the option
     """
-    # Convert dates to datetime objects if they are strings
+    # Date conversion handling for current_date
     if isinstance(current_date, str):
         current_date = datetime.strptime(current_date, '%Y-%m-%d')
+    elif hasattr(current_date, 'year') and not callable(getattr(current_date, 'date', None)):
+        # It's a date object, convert to datetime
+        current_date = datetime.combine(current_date, datetime.min.time())
+    
+    # Date conversion handling for expiration_date
     if isinstance(expiration_date, str):
         expiration_date = datetime.strptime(expiration_date, '%Y-%m-%d')
+    elif hasattr(expiration_date, 'year') and not callable(getattr(expiration_date, 'date', None)):
+        # It's a date object, convert to datetime
+        expiration_date = datetime.combine(expiration_date, datetime.min.time())
     
     # Check if data file exists
     data_file = f'data/processed/{ticker}.csv'
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Historical data for {ticker} not found. Please run datagrab.r first.")
+    
+    print(f"Pricing options for {ticker} on {current_date} to {expiration_date}")
     
     # Load the historical data for the ticker
     data = pd.read_csv(data_file)
@@ -133,7 +143,6 @@ def black_scholes(S, K, T, r, sigma, option_type='call'):
     # Calculate d1 and d2
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    
     # Calculate option price based on type
     if option_type.lower() == 'call':
         price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)

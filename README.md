@@ -16,8 +16,11 @@ This codebase provides the tools to analyze, backtest, and potentially implement
 ```
 dispersion-trading/
 ├── backtester/                # Backtesting framework
+│   ├── engine.py              # Main backtesting engine
 │   ├── options_pricer.py      # Options pricing models
-│   ├── volatility.py          # Volatility and correlation calculations
+│   ├── volatility.py          # Volatility calculations
+│   ├── correlation.py         # Correlation calculations
+│   ├── weights.py             # Index weight handling
 │   ├── universe.py            # Trading universe definition
 │   └── __init__.py            # Package indicator
 ├── data/                      # Data handling
@@ -27,7 +30,8 @@ dispersion-trading/
 │   ├── options_test.py        # Tests for options pricing
 │   └── options_test.ipynb     # Interactive notebook tests
 ├── config.json                # Configurable parameters
-├── constituents-sp500.csv     # S&P 500 constituent stocks
+├── constituents-sp500.csv     # S&P 500 constituent stocks with weights
+├── main.py                    # Main script to run the backtest
 └── README.md                  # This file
 ```
 
@@ -72,6 +76,12 @@ The system uses a central `config.json` file for all parameters. You can customi
 - Trading parameters
 - Options pricing models
 - Volatility calculation methods
+- Dispersion strategy parameters
+
+Important dispersion strategy parameters include:
+- `entry_threshold`: Difference between implied and realized correlation that triggers entry (default: 0.05)
+- `exit_threshold`: Threshold for exiting positions when correlations converge (default: 0.02)
+- `max_position_size`: Maximum portfolio allocation for a trade (default: 0.1 or 10%)
 
 ### Data Acquisition
 
@@ -112,12 +122,32 @@ hist_vol = calculate_historical_volatility("AAPL", "2022-01-10", lookback=30)
 implied_vol = calculate_vix_implied_volatility("AAPL", "2022-01-10", lookback=30)
 ```
 
+### Correlation Calculations
+
+The system calculates both realized and implied correlations:
+
+```python
+from backtester.correlation import calculate_realized_correlation, calculate_implied_correlation
+
+# Calculate realized correlation between components
+realized_corr = calculate_realized_correlation(
+    ["AAPL", "MSFT", "AMZN"],
+    "2022-01-10",
+    lookback=30
+)
+
+# Calculate implied correlation between index and components
+implied_corr = calculate_implied_correlation(
+    "SPY",
+    ["AAPL", "MSFT", "AMZN"],
+    "2022-01-10",
+    lookback=30
+)
+```
+
 ### Options Pricing
 
 The system provides two options pricing models with enhanced volatility handling:
-
-1. Black-Scholes (for European options)
-2. Binomial Tree (for American options with early exercise)
 
 ```python
 from backtester.options_pricer import price_options
@@ -147,23 +177,72 @@ custom_price = price_options(
 print(f"Option price: ${option_price:.2f}")
 ```
 
-## Volatility and Correlation Models
+### Running a Backtest
 
-### Volatility Calculation Methods
+To run a complete backtest of the dispersion trading strategy:
 
-The system supports multiple approaches to volatility estimation:
+```bash
+python main.py
+```
 
-1. **Historical Volatility**: Calculated from historical returns over a specified lookback period
-2. **VIX-Implied Volatility**: Scales historical volatility using the VIX as a proxy for market volatility risk premium
-3. **Custom Volatility**: User-specified volatility values
+This will:
+1. Load configuration from `config.json`
+2. Initialize the backtesting engine
+3. Run the backtest from start to end date
+4. Calculate and display performance metrics
+5. Save results and plots to the results directory
 
-### Implied Correlation
+#### Backtesting Engine
 
-Implied correlation is calculated using implied volatilities of the index and its components:
+The engine processes each trading day by:
+1. Updating the value of existing positions
+2. Checking for expired options and closing those positions
+3. Generating trading signals based on correlation dispersion
+4. Executing trades based on signals
+5. Recording end-of-day portfolio values
 
-1. The system calculates implied volatilities for both index and components
-2. It uses these values to derive the implied correlation embedded in options prices
-3. This forms the basis of dispersion trading signals
+#### Trading Signals
+
+The dispersion trading system uses two main types of entry signals:
+
+1. **Standard Dispersion Trade** (when `dispersion > entry_threshold`):
+   - Sell index options (collect premium)
+   - Buy component options (pay premium)
+   - Used when implied correlation is significantly higher than realized correlation
+
+2. **Reverse Dispersion Trade** (when `dispersion < -entry_threshold`):
+   - Buy index options (pay premium)
+   - Sell component options (collect premium)
+   - Used when implied correlation is significantly lower than realized correlation
+
+Positions are exited when:
+- The disparity between implied and realized correlation narrows below the exit threshold
+- Options reach their expiration date
+
+### Results Analysis
+
+After running a backtest, review the performance metrics and outputs:
+
+```python
+from backtester.engine import BacktestEngine
+import json
+
+# Load configuration
+with open('config.json', 'r') as f:
+    config = json.load(f)
+
+# Initialize and run the backtest
+engine = BacktestEngine(config)
+results = engine.run()
+
+# Review performance metrics
+print(f"Total Return: {results['performance_metrics']['total_return']:.2%}")
+print(f"Sharpe Ratio: {results['performance_metrics']['sharpe_ratio']:.2f}")
+print(f"Max Drawdown: {results['performance_metrics']['max_drawdown']:.2%}")
+
+# Plot results
+engine.plot_results()
+```
 
 ## Options Pricing Models
 
@@ -197,17 +276,19 @@ The historical price data is stored in CSV format with the following columns:
 - Volume: Trading volume
 - Adjusted: Adjusted closing price (adjusted for splits and dividends)
 
-## Path Configuration
+## Index Weights
 
-Note that the options pricer expects data files to be in the `data/processed/` directory relative to the project root. When running from subdirectories, ensure proper path configuration or run from the project root.
+The system uses index component weights from `constituents-sp500.csv` for more accurate correlation calculations. The weights are used to:
+- Calculate weighted implied volatility of the index
+- Properly weight components in correlation calculations
+- Generate more accurate dispersion signals
 
-## Future Development
+## Known Issues and Limitations
 
-Planned enhancements include:
-- Correlation calculation module
-- Full backtesting engine
-- Portfolio optimization
-- Performance visualization
+- The system requires VIX data for implied volatility calculations
+- Short options positions have theoretically unlimited risk
+- Limited transaction cost modeling
+- No dividends handling in options pricing
 
 ## Contributors
 
