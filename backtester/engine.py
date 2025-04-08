@@ -3,7 +3,10 @@ import os
 from datetime import datetime, timedelta
 from backtester.correlation import calculate_correlation_dispersion
 from backtester.options_pricer import price_options
+from backtester.dspx import load_dspx_data, calculate_dspx_signal
+from backtester.risk_manager import RiskManager
 import numpy as np
+from .weights import load_index_weights
 
 class BacktestEngine:
     def __init__(self, config):
@@ -22,49 +25,141 @@ class BacktestEngine:
         self.portfolio_history = []  # Daily portfolio values
         self.trade_history = []      # Record of all trades
         
+        # Initialize risk manager
+        self.risk_manager = RiskManager(config)
+        
         # Initialize data
         self._load_data()
         
     def _load_data(self):
-        """Load all required data for backtesting"""
-        # Get the universe of stocks
-        self.index_ticker = self.config['universe']['index']
-        # Load selected component tickers
-        from backtester.universe import selected_tickers
-        self.component_tickers = selected_tickers
-        
-        # Load price data
-        self._load_price_data()
-        
-        # Build a calendar of trading dates
-        self._build_date_range()
-        
-    def _load_price_data(self):
-        """Load price data for index and all component stocks"""
-        import pandas as pd
+        """Load and prepare data for the backtest"""
+        # Import data loading utilities
         import os
+        import pandas as pd
+        from datetime import datetime
+        import numpy as np
         
+        # Set up trading dates range
+        start_date = datetime.strptime(self.start_date, '%Y-%m-%d').date()
+        end_date = datetime.strptime(self.end_date, '%Y-%m-%d').date()
+        
+        # Load stock price data
         self.price_data = {}
+        self.index_ticker = self.config['universe']['index']
         
         # Load index data
-        index_file = f"data/processed/{self.index_ticker}.csv"
-        if os.path.exists(index_file):
-            self.price_data[self.index_ticker] = pd.read_csv(index_file)
-            self.price_data[self.index_ticker]['date'] = pd.to_datetime(self.price_data[self.index_ticker]['date'])
+        index_file = f"{self.config['paths']['data_dir']}{self.index_ticker}.csv"
+        if not os.path.exists(index_file):
+            raise FileNotFoundError(f"Index data file not found: {index_file}")
+        
+        index_data = pd.read_csv(index_file)
+        index_data['date'] = pd.to_datetime(index_data['date'])
+        
+        # Filter for the backtest period
+        index_data = index_data[(index_data['date'].dt.date >= start_date) & 
+                               (index_data['date'].dt.date <= end_date)]
+        
+        self.price_data[self.index_ticker] = index_data
+        
+        # Load VIX data for volatility calculations
+        vix_file = f"{self.config['paths']['data_dir']}^VIX.csv"
+        if os.path.exists(vix_file):
+            vix_data = pd.read_csv(vix_file)
+            vix_data['date'] = pd.to_datetime(vix_data['date'])
+            
+            # Remove rows with NA values in critical columns
+            vix_data = vix_data.dropna(subset=['Close', 'Adjusted'])
+            
+            # Only keep dates that exist in the index data to ensure alignment
+            vix_data = vix_data[vix_data['date'].dt.date.isin(index_data['date'].dt.date)]
+            
+            self.price_data['^VIX'] = vix_data
+        else:
+            print("Warning: VIX data not found. Implied volatility calculations will use historical volatility.")
+        
+        # Set up component universe
+        if self.config['universe']['random_selection']:
+            # Load S&P500 constituents
+            constituents_file = "constituents-sp500.csv"
+            if not os.path.exists(constituents_file):
+                raise FileNotFoundError(f"Constituents file not found: {constituents_file}")
+            
+            constituents = pd.read_csv(constituents_file)
+            
+            # Set random seed for reproducibility
+            np.random.seed(self.config['universe']['seed'])
+            
+            # Randomly select stocks
+            num_stocks = min(self.config['universe']['num_stocks'], len(constituents))
+            selected_tickers = np.random.choice(
+                constituents['Symbol'], 
+                size=num_stocks, 
+                replace=False
+            )
+            
+            self.component_tickers = list(selected_tickers)
+        else:
+            # Use predefined list
+            self.component_tickers = self.config.get('universe', {}).get('tickers', [])
         
         # Load component data
-        for ticker in self.component_tickers:
-            ticker_file = f"data/processed/{ticker}.csv"
-            if os.path.exists(ticker_file):
-                self.price_data[ticker] = pd.read_csv(ticker_file)
-                self.price_data[ticker]['date'] = pd.to_datetime(self.price_data[ticker]['date'])
+        valid_components = []
+        valid_trading_dates = set(index_data['date'].dt.date)
         
-        # Load VIX data for implied volatility
-        vix_file = f"data/processed/^VIX.csv"
-        if os.path.exists(vix_file):
-            self.price_data["^VIX"] = pd.read_csv(vix_file)
-            self.price_data["^VIX"]['date'] = pd.to_datetime(self.price_data["^VIX"]['date'])
-    
+        for ticker in self.component_tickers:
+            stock_file = f"{self.config['paths']['data_dir']}{ticker}.csv"
+            if not os.path.exists(stock_file):
+                print(f"Warning: Data for {ticker} not found, excluding from universe.")
+                continue
+            
+            stock_data = pd.read_csv(stock_file)
+            stock_data['date'] = pd.to_datetime(stock_data['date'])
+            
+            # Filter for the backtest period
+            stock_data = stock_data[(stock_data['date'].dt.date >= start_date) & 
+                                   (stock_data['date'].dt.date <= end_date)]
+            
+            # Remove any rows with NA values in price columns
+            stock_data = stock_data.dropna(subset=['Close', 'Adjusted'])
+            
+            # Ensure stock has data for all trading dates
+            stock_dates = set(stock_data['date'].dt.date)
+            if len(stock_dates.intersection(valid_trading_dates)) < len(valid_trading_dates) * 0.9:
+                print(f"Warning: {ticker} has insufficient data coverage, excluding from universe.")
+                continue
+            
+            self.price_data[ticker] = stock_data
+            valid_components.append(ticker)
+        
+        # Update component tickers to only include valid ones
+        self.component_tickers = valid_components
+        print(f"Using {len(self.component_tickers)} components for dispersion trading.")
+        
+        # Ensure all data sources have the same trading days
+        # Get intersection of all available dates
+        common_dates = set(index_data['date'].dt.date)
+        for ticker, df in self.price_data.items():
+            common_dates = common_dates.intersection(set(df['date'].dt.date))
+        
+        # Filter all data to only include common dates
+        for ticker in self.price_data:
+            self.price_data[ticker] = self.price_data[ticker][
+                self.price_data[ticker]['date'].dt.date.isin(common_dates)
+            ]
+        
+        # Extract trading dates from index data
+        self.trading_dates = sorted(list(common_dates))
+        
+        # Load DSPX data if available
+        try:
+            self.dspx_data = load_dspx_data()
+            # Ensure DSPX data only includes available trading dates
+            self.dspx_data = self.dspx_data[self.dspx_data['date'].dt.date.isin(common_dates)]
+            print(f"Loaded DSPX data with {len(self.dspx_data)} entries.")
+        except Exception as e:
+            print(f"Warning: Could not load DSPX data: {e}")
+            self.dspx_data = None
+        
     def _build_date_range(self):
         """Build a calendar of trading dates from the price data"""
         import pandas as pd
@@ -111,12 +206,18 @@ class BacktestEngine:
         # 2. Check for expired options and close those positions
         self._process_expirations()
         
-        # 3. Generate trading signals
-        signals = self._generate_signals()
+        # 3. Generate trading signals if we're not in a high-risk state
+        signals = None
+        if not self.risk_manager.should_close_all_positions():
+            # Only generate signals if we can enter new trades
+            if self.risk_manager.can_enter_new_trades(self.current_date):
+                signals = self._generate_signals(self.current_date)
+            else:
+                print(f"Not generating signals on {self.current_date} due to risk management constraints")
         
         # 4. Execute trades based on signals
         if signals:
-            self._execute_trades(signals)
+            self._execute_trades(signals, self.current_date)
         
         # 5. Record end-of-day portfolio value
         self._record_portfolio_value()
@@ -125,6 +226,7 @@ class BacktestEngine:
         """Update the value of all open positions"""
         # For each position, calculate its current market value
         portfolio_value = self.current_cash
+        positions_to_close = []
         
         for position_id, position in self.positions.items():
             # If the position is still open
@@ -132,8 +234,25 @@ class BacktestEngine:
                 current_value = self._calculate_position_value(position)
                 position['current_value'] = current_value
                 portfolio_value += current_value
+                
+                # Check if stop-loss has been triggered
+                if self.risk_manager.check_position_stop_loss(position):
+                    positions_to_close.append(position_id)
         
+        # Close positions that hit stop-loss
+        for position_id in positions_to_close:
+            self._close_position(position_id, self.positions[position_id], reason="stop_loss")
+            
+        # Update portfolio value
         self.current_portfolio_value = portfolio_value
+        
+        # Update risk manager with new portfolio value and positions
+        self.risk_manager.set_portfolio_value(portfolio_value, self.current_date)
+        self.risk_manager.update_positions(self.positions)
+        
+        # Check if we should close all positions due to excessive risk
+        if self.risk_manager.should_close_all_positions():
+            self._close_all_positions(reason="risk_limit")
     
     def _calculate_position_value(self, position):
         """Calculate the current value of a position"""
@@ -237,61 +356,44 @@ class BacktestEngine:
             }
         )
     
-    def _generate_signals(self):
-        """Generate trading signals based on dispersion strategy"""
-        from backtester.correlation import calculate_correlation_dispersion
-        from datetime import datetime
-        
-        # Skip if we don't have enough components
-        if len(self.component_tickers) <= 1:
-            return None
-        
+    def _generate_signals(self, current_date):
+        """Generate trading signals based on market conditions"""
         try:
+            # Skip if we're testing with too few components
+            if len(self.component_tickers) <= 1:
+                return None
+                
             # Convert date to datetime for proper comparison
-            current_datetime = datetime.combine(self.current_date, datetime.min.time())
+            current_datetime = datetime.combine(current_date, datetime.min.time())
             
-            # Calculate dispersion metrics
-            metrics = calculate_correlation_dispersion(
-                self.index_ticker, 
-                self.component_tickers, 
-                current_datetime,  # Use datetime instead of date
-                lookback=self.config['options']['volatility_lookback']
-            )
-            
-            # Get thresholds from config
+            # Use DSPX data to generate signals
             entry_threshold = self.config['dispersion']['entry_threshold']
             exit_threshold = self.config['dispersion']['exit_threshold']
+            lookback = self.config['options']['volatility_lookback']
             
-            dispersion = metrics['correlation_dispersion']
+            # Calculate signals based on DSPX
+            signal = calculate_dspx_signal(
+                self.dspx_data,
+                current_datetime,
+                lookback=lookback,
+                entry_threshold=entry_threshold,
+                exit_threshold=exit_threshold
+            )
             
-            # Check for signals
-            if dispersion > entry_threshold:
-                # High implied correlation relative to realized
-                # Sell index options, buy component options
-                return {
-                    'signal': 'ENTER_DISPERSION',
-                    'action': 'SELL_INDEX_BUY_COMPONENTS',
-                    'metrics': metrics
-                }
-            elif dispersion < -entry_threshold:
-                # Low implied correlation relative to realized
-                # Buy index options, sell component options
-                return {
-                    'signal': 'ENTER_REVERSE_DISPERSION',
-                    'action': 'BUY_INDEX_SELL_COMPONENTS',
-                    'metrics': metrics
-                }
-            elif abs(dispersion) < exit_threshold and self._has_open_dispersion_positions():
-                # Correlation gap has closed - exit positions
-                return {
-                    'signal': 'EXIT',
-                    'action': 'CLOSE_POSITIONS',
-                    'metrics': metrics
-                }
+            # Only generate EXIT signal if we have open positions
+            if signal and signal['signal'] == 'EXIT' and not self._has_open_dispersion_positions():
+                return None
+                
+            # Print some information about the signal
+            if signal:
+                print(f"DSPX Signal on {current_date}: {signal['signal']}")
+                print(f"DSPX Value: {signal['metrics']['dspx_value']:.2f}, Z-Score: {signal['metrics']['z_score']:.2f}")
+                
+            return signal
             
         except Exception as e:
-            print(f"Error generating signals on {self.current_date}: {e}")
-        
+            print(f"Error generating signals on {current_date}: {e}")
+            
         return None
     
     def _has_open_dispersion_positions(self):
@@ -301,42 +403,67 @@ class BacktestEngine:
                 return True
         return False
     
-    def _execute_trades(self, signal):
-        """Execute trades based on the signal"""
+    def _execute_trades(self, signals, current_date):
+        """Execute trades based on signals and risk management constraints"""
+        # Only execute trades if risk manager allows it
+        if not self.risk_manager.can_enter_new_trades(current_date):
+            if self.risk_manager.hard_recovery_mode:
+                print(f"In hard recovery mode - not executing any new trades.")
+            elif self.risk_manager.soft_recovery_mode:
+                print(f"In soft recovery mode - executing trades at reduced size.")
+                # Continue with execution
+            else:
+                print(f"Risk constraints prevent entering new trades.")
+            return
+        
         # Implementation will vary based on your specific strategy requirements
-        if signal['signal'] == 'ENTER_DISPERSION':
+        if signals['signal'] == 'ENTER_DISPERSION':
             self._enter_dispersion_trade()
-        elif signal['signal'] == 'ENTER_REVERSE_DISPERSION':
+        elif signals['signal'] == 'ENTER_REVERSE_DISPERSION':
             self._enter_reverse_dispersion_trade()
-        elif signal['signal'] == 'EXIT':
+        elif signals['signal'] == 'EXIT':
             self._exit_dispersion_trades()
     
     def _enter_dispersion_trade(self):
         """
         Execute a dispersion trade:
-        - Sell index options (collect premium)
-        - Buy component options (pay premium)
+        - Short index options (collect premium)
+        - Long component options (pay premium)
+        
+        This is used when implied correlation is higher than realized correlation.
         """
         from datetime import timedelta
+        from .weights import load_index_weights
         
-        # 1. Calculate the option parameters - use 30 calendar days (about 1 month)
+        # 1. Calculate the option parameters - use at least 30 calendar days (about 1 month)
         target_expiry = self.current_date + timedelta(days=30)
         
         # Find the nearest valid trading day to our target expiry
-        valid_expiry_days = [d for d in self.trading_dates if d >= target_expiry]
-        if valid_expiry_days:
-            expiration_date = valid_expiry_days[0]  # First trading day on/after our target
-        else:
-            # If we're near the end of our data, use the last trading day
-            expiration_date = self.trading_dates[-1]
+        valid_expiry_days = [d for d in self.trading_dates if d > self.current_date]
+        if not valid_expiry_days:
+            print(f"No valid expiry dates available after {self.current_date}")
+            return
+            
+        # Use an expiry date that's at least 7 days in the future
+        future_dates = [d for d in valid_expiry_days if (d - self.current_date).days >= 7]
+        if not future_dates:
+            print(f"No valid expiry dates at least 7 days after {self.current_date}")
+            return
+            
+        # Choose the closest date to our target that's at least 7 days out
+        min_expiry = future_dates[0]
+        expiration_date = min([d for d in future_dates if (d - target_expiry).days >= 0] or [future_dates[-1]])
         
         # Log the expiration we're using
         days_to_expiry = (expiration_date - self.current_date).days
-        print(f"Setting up trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
+        print(f"Setting up dispersion trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
+        
+        # Track exposures
+        total_short_exposure = 0
         
         # 2. Short the index option (ATM straddle - both call and put)
         index_price = self._get_price_on_date(self.index_ticker, self.current_date)
-        index_strike = round(index_price)  # Rounded to nearest whole number
+        index_strike = round(index_price)
         
         # Price the index options
         try:
@@ -358,22 +485,30 @@ class BacktestEngine:
                 option_type='put'
             )
             
-            # Calculate quantities safely
-            index_capital = self.current_portfolio_value * 0.5  # Allocate half to short index options
+            # Use risk manager to calculate position sizing
+            index_call_contracts = self.risk_manager.calculate_position_sizing(
+                'dispersion', 
+                self.index_ticker, 
+                'call', 
+                index_call_price, 
+                self.current_portfolio_value
+            )
             
-            # Safe calculation for call contracts
-            if index_call_price > 0:
-                index_call_contracts = max(0, int(index_capital / (index_call_price * 100) / 2))
-            else:
-                index_call_contracts = 0
-                print(f"Warning: Zero or invalid call price for {self.index_ticker}")
+            index_put_contracts = self.risk_manager.calculate_position_sizing(
+                'dispersion', 
+                self.index_ticker, 
+                'put', 
+                index_put_price, 
+                self.current_portfolio_value
+            )
             
-            # Safe calculation for put contracts
-            if index_put_price > 0:
-                index_put_contracts = max(0, int(index_capital / (index_put_price * 100) / 2))
-            else:
-                index_put_contracts = 0
-                print(f"Warning: Zero or invalid put price for {self.index_ticker}")
+            # Check if positions would exceed portfolio risk limits
+            call_value = -index_call_contracts * index_call_price * 100  # Negative for short
+            put_value = -index_put_contracts * index_put_price * 100     # Negative for short
+            
+            if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
+                print("Skipping trade due to portfolio risk limits")
+                return
             
             # Execute the index trades (short)
             if index_call_contracts > 0:
@@ -386,6 +521,7 @@ class BacktestEngine:
                     price=index_call_price,
                     strategy='dispersion'
                 )
+                total_short_exposure += call_value
             
             if index_put_contracts > 0:
                 self._open_option_position(
@@ -397,25 +533,102 @@ class BacktestEngine:
                     price=index_put_price,
                     strategy='dispersion'
                 )
+                total_short_exposure += put_value
             
-            # Update remaining budget
+            # Calculate the premium collected
             premium_collected = (index_call_price * index_call_contracts + 
-                                index_put_price * index_put_contracts) * 100
+                               index_put_price * index_put_contracts) * 100
+            
+            # Add the premium collected to our cash
             self.current_cash += premium_collected
+            
+            # Log the amount collected from shorting index options
+            print(f"Premium collected from index options: ${premium_collected:,.2f}")
+            print(f"Total short exposure: ${total_short_exposure:,.2f}")
+            
+            # If no premium was collected, exit
+            if premium_collected <= 0:
+                print("No premium collected. Skipping component trades.")
+                return
+            
+            # Use the risk manager to calculate a balanced component budget based on the premium collected
+            component_premium_target = premium_collected * self.risk_manager.long_short_balance_factor
             
         except Exception as e:
             print(f"Error pricing index options: {e}")
             return
         
         # 3. Long the component options (ATM straddles)
-        # Calculate equal allocation for each component
         if len(self.component_tickers) > 0:
-            component_budget = self.current_portfolio_value * 0.5  # Allocate half to component options
+            # Track the total premium spent and exposure
+            total_premium_spent = 0
+            total_long_exposure = 0
             
-            for ticker in self.component_tickers:
+            # Load component weights from S&P 500 constituents file
+            try:
+                component_weights = load_index_weights(self.index_ticker)
+                print(f"Loaded weights for {len(component_weights)} constituents")
+                
+                # Filter to only include components in our universe
+                valid_components = [ticker for ticker in self.component_tickers if ticker in component_weights]
+                
+                if len(valid_components) < 20:
+                    print(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
+                    # Sort the component tickers by weight (descending)
+                    sorted_components = sorted(
+                        component_weights.items(), 
+                        key=lambda x: x[1], 
+                        reverse=True
+                    )
+                    # Take the top 50 components by weight
+                    top_components = [comp[0] for comp in sorted_components[:50] 
+                                     if comp[0] in self.component_tickers]
+                    
+                    if len(top_components) > 0:
+                        valid_components = top_components
+                    else:
+                        # Fall back to equal weighting if no components match
+                        valid_components = self.component_tickers[:50]
+                        component_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
+                else:
+                    # Take top 50 components by weight to focus exposure
+                    filtered_weights = {ticker: component_weights[ticker] for ticker in valid_components}
+                    sorted_components = sorted(
+                        filtered_weights.items(), 
+                        key=lambda x: x[1], 
+                        reverse=True
+                    )
+                    valid_components = [comp[0] for comp in sorted_components[:50]]
+                
+                # Renormalize weights for selected components
+                total_weight = sum(component_weights[ticker] for ticker in valid_components)
+                normalized_weights = {
+                    ticker: component_weights[ticker] / total_weight for ticker in valid_components
+                }
+                
+                print(f"Trading with {len(valid_components)} weighted components")
+                
+            except Exception as e:
+                print(f"Error loading component weights: {e}. Using equal weighting.")
+                valid_components = self.component_tickers[:50]  # Limit to 50 components
+                normalized_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
+            
+            # Allocate the premium target across components based on their weights
+            premium_target_per_component = {
+                ticker: component_premium_target * normalized_weights[ticker]
+                for ticker in valid_components
+            }
+            
+            # Log the weighted allocation
+            print(f"Total target premium to spend: ${component_premium_target:,.2f}")
+            
+            for ticker in valid_components:
                 try:
                     comp_price = self._get_price_on_date(ticker, self.current_date)
                     comp_strike = round(comp_price)
+                    
+                    target_premium = premium_target_per_component[ticker]
+                    print(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
                     
                     # Price component call
                     comp_call_price = self._price_option(
@@ -435,19 +648,44 @@ class BacktestEngine:
                         option_type='put'
                     )
                     
-                    # Safe calculation for component calls
-                    if comp_call_price > 0:
-                        comp_call_contracts = max(0, int(component_budget / (comp_call_price * 100) / 2))
-                    else:
-                        comp_call_contracts = 0
-                        print(f"Warning: Zero or invalid call price for {ticker}")
+                    # Calculate contracts needed to reach premium target (split between call and put)
+                    target_call_contracts = int(target_premium / 2 / (comp_call_price * 100))
+                    target_put_contracts = int(target_premium / 2 / (comp_put_price * 100))
                     
-                    # Safe calculation for component puts
-                    if comp_put_price > 0:
-                        comp_put_contracts = max(0, int(component_budget / (comp_put_price * 100) / 2))
-                    else:
-                        comp_put_contracts = 0
-                        print(f"Warning: Zero or invalid put price for {ticker}")
+                    # Ensure minimum of 1 contract if target is positive
+                    if target_call_contracts == 0 and target_premium > 0:
+                        target_call_contracts = 1
+                    if target_put_contracts == 0 and target_premium > 0:
+                        target_put_contracts = 1
+                    
+                    # Limit by risk manager
+                    risk_call_contracts = self.risk_manager.calculate_position_sizing(
+                        'dispersion', 
+                        ticker, 
+                        'call', 
+                        comp_call_price, 
+                        self.current_portfolio_value * normalized_weights[ticker]
+                    )
+                    
+                    risk_put_contracts = self.risk_manager.calculate_position_sizing(
+                        'dispersion', 
+                        ticker, 
+                        'put', 
+                        comp_put_price, 
+                        self.current_portfolio_value * normalized_weights[ticker]
+                    )
+                    
+                    # Use the minimum of target and risk-based sizing
+                    comp_call_contracts = min(target_call_contracts, risk_call_contracts)
+                    comp_put_contracts = min(target_put_contracts, risk_put_contracts)
+                    
+                    # Check if positions would exceed portfolio risk limits
+                    call_value = comp_call_contracts * comp_call_price * 100
+                    put_value = comp_put_contracts * comp_put_price * 100
+                    
+                    if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
+                        print(f"Skipping {ticker} component trade due to portfolio risk limits")
+                        continue
                     
                     # Execute the component trades (long)
                     if comp_call_contracts > 0:
@@ -460,6 +698,9 @@ class BacktestEngine:
                             price=comp_call_price,
                             strategy='dispersion'
                         )
+                        premium_spent = comp_call_price * comp_call_contracts * 100
+                        total_premium_spent += premium_spent
+                        total_long_exposure += call_value
                     
                     if comp_put_contracts > 0:
                         self._open_option_position(
@@ -471,10 +712,30 @@ class BacktestEngine:
                             price=comp_put_price,
                             strategy='dispersion'
                         )
+                        premium_spent = comp_put_price * comp_put_contracts * 100
+                        total_premium_spent += premium_spent
+                        total_long_exposure += put_value
                     
                 except Exception as e:
                     print(f"Error trading component {ticker}: {e}")
                     continue
+            
+            # Deduct the premium spent from our cash
+            self.current_cash -= total_premium_spent
+            
+            # Verify final trade balance
+            print(f"Total short exposure (index options): ${total_short_exposure:,.2f}")
+            print(f"Total long exposure (component options): ${total_long_exposure:,.2f}")
+            print(f"Total premium spent: ${total_premium_spent:,.2f}")
+            
+            is_balanced = self.risk_manager.check_trade_balance(total_long_exposure, total_short_exposure)
+            if not is_balanced:
+                print(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
+                     f"{total_long_exposure/abs(total_short_exposure):.2f}")
+            else:
+                print("Trade exposure is balanced.")
+        else:
+            print("No component tickers available for dispersion trade")
     
     def _price_option(self, ticker, current_date, expiration_date, strike_price, option_type):
         """Price an option using the configured pricing model"""
@@ -647,11 +908,53 @@ class BacktestEngine:
         self.trade_history.append(trade)
     
     def _record_portfolio_value(self):
-        """Record the current portfolio value"""
-        self.portfolio_history.append({
+        """Record the current portfolio value and risk metrics"""
+        # Get risk metrics from risk manager
+        drawdown = self.risk_manager.current_drawdown
+        risk_status = self.risk_manager.get_status_dict()
+        
+        # Calculate position metrics
+        total_long_exposure = 0
+        total_short_exposure = 0
+        index_exposure = 0
+        components_exposure = 0
+        
+        for position in self.positions.values():
+            if position['status'] == 'open':
+                position_value = position['current_value']
+                
+                # Track long vs short exposure
+                if position['quantity'] > 0:
+                    total_long_exposure += position_value
+                else:
+                    total_short_exposure += position_value
+                    
+                # Track index vs components exposure
+                if position['ticker'] == self.index_ticker:
+                    index_exposure += position_value
+                else:
+                    components_exposure += position_value
+        
+        # Calculate net exposure
+        net_exposure = total_long_exposure + total_short_exposure
+        net_exposure_pct = net_exposure / self.current_portfolio_value if self.current_portfolio_value != 0 else 0
+        
+        # Record all metrics
+        portfolio_entry = {
             'date': self.current_date,
-            'value': self.current_portfolio_value
-        })
+            'value': self.current_portfolio_value,
+            'cash': self.current_cash,
+            'drawdown': drawdown,
+            'long_exposure': total_long_exposure,
+            'short_exposure': total_short_exposure,
+            'net_exposure': net_exposure,
+            'net_exposure_pct': net_exposure_pct,
+            'index_exposure': index_exposure,
+            'components_exposure': components_exposure,
+            'recovery_mode': risk_status.get('recovery_mode', False)
+        }
+        
+        self.portfolio_history.append(portfolio_entry)
     
     def _calculate_performance(self):
         """Calculate performance metrics for the backtest"""
@@ -661,24 +964,24 @@ class BacktestEngine:
         # Convert portfolio history to DataFrame
         portfolio_df = pd.DataFrame(self.portfolio_history)
         
-        # Calculate returns
-        portfolio_df['return'] = portfolio_df['value'].pct_change()
+        print("Available columns in portfolio_df:", portfolio_df.columns.tolist())
+        # Now you'll see what columns are available to use instead of 'value'
+        portfolio_df['return'] = portfolio_df['value'].pct_change()  # This line will still fail
         
         # Calculate cumulative returns
         portfolio_df['cumulative_return'] = (1 + portfolio_df['return']).cumprod() - 1
         
-        # Calculate drawdowns
-        portfolio_df['peak'] = portfolio_df['value'].cummax()
-        portfolio_df['drawdown'] = (portfolio_df['value'] - portfolio_df['peak']) / portfolio_df['peak']
-        
         # Calculate various metrics
         self.performance_metrics = {
-            'total_return': portfolio_df['cumulative_return'].iloc[-1],
-            'annualized_return': portfolio_df['return'].mean() * 252,
-            'annualized_volatility': portfolio_df['return'].std() * np.sqrt(252),
-            'sharpe_ratio': portfolio_df['return'].mean() / portfolio_df['return'].std() * np.sqrt(252),
-            'max_drawdown': portfolio_df['drawdown'].min(),
-            'final_value': portfolio_df['value'].iloc[-1]
+            'total_return': portfolio_df['cumulative_return'].iloc[-1] if not portfolio_df.empty else 0,
+            'annualized_return': portfolio_df['return'].mean() * 252 if not portfolio_df.empty else 0,
+            'annualized_volatility': portfolio_df['return'].std() * np.sqrt(252) if not portfolio_df.empty else 0,
+            'sharpe_ratio': (portfolio_df['return'].mean() / portfolio_df['return'].std() * np.sqrt(252)) 
+                           if not portfolio_df.empty and portfolio_df['return'].std() > 0 else 0,
+            'max_drawdown': portfolio_df['drawdown'].min() if not portfolio_df.empty else 0,
+            'avg_exposure': portfolio_df['net_exposure_pct'].mean() if not portfolio_df.empty else 0,
+            'max_exposure': portfolio_df['net_exposure_pct'].max() if not portfolio_df.empty else 0,
+            'final_value': portfolio_df['value'].iloc[-1] if not portfolio_df.empty else 0
         }
         
         self.portfolio_df = portfolio_df
@@ -692,25 +995,73 @@ class BacktestEngine:
         }
     
     def plot_results(self):
-        """Plot the results of the backtest"""
+        """Plot the results of the backtest including risk metrics"""
         import matplotlib.pyplot as plt
         
         # Plot portfolio value over time
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(12, 16))
         
-        plt.subplot(2, 1, 1)
+        # Portfolio value
+        plt.subplot(4, 1, 1)
         plt.plot(self.portfolio_df['date'], self.portfolio_df['value'])
         plt.title('Portfolio Value')
         plt.grid(True)
         
-        plt.subplot(2, 1, 2)
+        # Cumulative return
+        plt.subplot(4, 1, 2)
         plt.plot(self.portfolio_df['date'], self.portfolio_df['cumulative_return'] * 100)
         plt.title('Cumulative Return (%)')
         plt.grid(True)
         
+        # Drawdown
+        plt.subplot(4, 1, 3)
+        plt.plot(self.portfolio_df['date'], self.portfolio_df['drawdown'] * 100)
+        plt.axhline(y=self.config['risk_management']['max_drawdown_pct'] * 100, 
+                   color='r', linestyle='--', label='Max Drawdown Limit')
+        plt.title('Drawdown (%)')
+        plt.legend()
+        plt.grid(True)
+        
+        # Exposure metrics
+        plt.subplot(4, 1, 4)
+        plt.plot(self.portfolio_df['date'], self.portfolio_df['net_exposure_pct'] * 100, 
+                label='Net Exposure %')
+        plt.axhline(y=self.config['risk_management']['max_portfolio_risk_pct'] * 100, 
+                   color='r', linestyle='--', label='Max Risk Limit')
+        plt.title('Portfolio Exposure (%)')
+        plt.legend()
+        plt.grid(True)
+        
         plt.tight_layout()
         plt.savefig('results/performance.png')
-        plt.close()
+        
+        # Create a second plot for exposure details
+        plt.figure(figsize=(12, 10))
+        
+        # Long vs Short Exposure
+        plt.subplot(2, 1, 1)
+        plt.plot(self.portfolio_df['date'], self.portfolio_df['long_exposure'], 
+                label='Long Exposure', color='green')
+        plt.plot(self.portfolio_df['date'], -self.portfolio_df['short_exposure'], 
+                label='Short Exposure', color='red')
+        plt.title('Long vs Short Exposure ($)')
+        plt.legend()
+        plt.grid(True)
+        
+        # Index vs Components Exposure
+        plt.subplot(2, 1, 2)
+        plt.plot(self.portfolio_df['date'], self.portfolio_df['index_exposure'], 
+                label='Index Exposure', color='blue')
+        plt.plot(self.portfolio_df['date'], self.portfolio_df['components_exposure'], 
+                label='Components Exposure', color='orange')
+        plt.title('Index vs Components Exposure ($)')
+        plt.legend()
+        plt.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig('results/exposure_details.png')
+        
+        plt.close('all')
 
     def _enter_reverse_dispersion_trade(self):
         """
@@ -721,17 +1072,37 @@ class BacktestEngine:
         This is the opposite of a standard dispersion trade, used when
         implied correlation is lower than realized correlation.
         """
-        # 1. Calculate the option parameters
-        expiration_days = self.config['options']['max_days_to_expiry']
-        expiration_date = self._add_trading_days(self.current_date, expiration_days)
+        from datetime import timedelta
         
-        # Calculate position size using a percentage of portfolio
-        position_size = self.current_portfolio_value * self.config['dispersion']['max_position_size']
-        remaining_budget = position_size
+        # 1. Calculate the option parameters - use at least 30 calendar days (about 1 month)
+        target_expiry = self.current_date + timedelta(days=30)
+        
+        # Find the nearest valid trading day to our target expiry
+        valid_expiry_days = [d for d in self.trading_dates if d > self.current_date]
+        if not valid_expiry_days:
+            print(f"No valid expiry dates available after {self.current_date}")
+            return
+            
+        # Use an expiry date that's at least 7 days in the future
+        future_dates = [d for d in valid_expiry_days if (d - self.current_date).days >= 7]
+        if not future_dates:
+            print(f"No valid expiry dates at least 7 days after {self.current_date}")
+            return
+            
+        # Choose the closest date to our target that's at least 7 days out
+        min_expiry = future_dates[0]
+        expiration_date = min([d for d in future_dates if (d - target_expiry).days >= 0] or [future_dates[-1]])
+        
+        # Log the expiration we're using
+        days_to_expiry = (expiration_date - self.current_date).days
+        print(f"Setting up reverse trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
+        
+        # Track exposures
+        total_long_exposure = 0
         
         # 2. Long the index option (ATM straddle - both call and put)
         index_price = self._get_price_on_date(self.index_ticker, self.current_date)
-        index_strike = round(index_price)  # Rounded to nearest whole number
+        index_strike = round(index_price)
         
         # Price the index options
         try:
@@ -753,10 +1124,30 @@ class BacktestEngine:
                 option_type='put'
             )
             
-            # Calculate quantities (LONG index options)
-            index_capital = position_size * 0.5  # Allocate half to long index options
-            index_call_contracts = int(index_capital / (index_call_price * 100) / 2)  # Half to calls
-            index_put_contracts = int(index_capital / (index_put_price * 100) / 2)    # Half to puts
+            # Use risk manager to calculate position sizing
+            index_call_contracts = self.risk_manager.calculate_position_sizing(
+                'reverse_dispersion', 
+                self.index_ticker, 
+                'call', 
+                index_call_price, 
+                self.current_portfolio_value
+            )
+            
+            index_put_contracts = self.risk_manager.calculate_position_sizing(
+                'reverse_dispersion', 
+                self.index_ticker, 
+                'put', 
+                index_put_price, 
+                self.current_portfolio_value
+            )
+            
+            # Check if positions would exceed portfolio risk limits
+            call_value = index_call_contracts * index_call_price * 100
+            put_value = index_put_contracts * index_put_price * 100
+            
+            if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
+                print("Skipping trade due to portfolio risk limits")
+                return
             
             # Execute the index trades (long)
             if index_call_contracts > 0:
@@ -769,6 +1160,7 @@ class BacktestEngine:
                     price=index_call_price,
                     strategy='reverse_dispersion'
                 )
+                total_long_exposure += call_value
             
             if index_put_contracts > 0:
                 self._open_option_position(
@@ -780,27 +1172,100 @@ class BacktestEngine:
                     price=index_put_price,
                     strategy='reverse_dispersion'
                 )
+                total_long_exposure += put_value
             
-            # Update remaining budget (spent money on index options)
+            # Calculate the total cost of index options
             index_cost = (index_call_price * index_call_contracts + 
                          index_put_price * index_put_contracts) * 100
-            remaining_budget = position_size - index_cost
+            
+            # Log the amount spent on index options
+            print(f"Total spent on index options: ${index_cost:,.2f}")
+            print(f"Total long exposure: ${total_long_exposure:,.2f}")
+            
+            # If no index options were purchased, exit
+            if total_long_exposure <= 0:
+                print("No index options purchased. Skipping component trades.")
+                return
+            
+            # Use the risk manager to calculate a balanced component budget 
+            # Use the balance factor in reverse (1/factor) since this is a reverse trade
+            component_premium_target = total_long_exposure / self.risk_manager.long_short_balance_factor
             
         except Exception as e:
             print(f"Error pricing index options: {e}")
             return
         
         # 3. Short the component options (ATM straddles)
-        # Calculate equal allocation for each component
         if len(self.component_tickers) > 0:
-            # We'll collect premium here, so it's about risk management
-            # Limit the number of short contracts based on remaining budget
-            component_risk_allocation = remaining_budget / len(self.component_tickers)
+            # Track the total premium collected
+            total_premium_collected = 0
+            total_short_exposure = 0
             
-            for ticker in self.component_tickers:
+            # Load component weights from S&P 500 constituents file
+            try:
+                component_weights = load_index_weights(self.index_ticker)
+                print(f"Loaded weights for {len(component_weights)} constituents")
+                
+                # Filter to only include components in our universe
+                valid_components = [ticker for ticker in self.component_tickers if ticker in component_weights]
+                
+                if len(valid_components) < 20:
+                    print(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
+                    # Sort the component tickers by weight (descending)
+                    sorted_components = sorted(
+                        component_weights.items(), 
+                        key=lambda x: x[1], 
+                        reverse=True
+                    )
+                    # Take the top 50 components by weight
+                    top_components = [comp[0] for comp in sorted_components[:50] 
+                                     if comp[0] in self.component_tickers]
+                    
+                    if len(top_components) > 0:
+                        valid_components = top_components
+                    else:
+                        # Fall back to equal weighting if no components match
+                        valid_components = self.component_tickers[:50]
+                        component_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
+                else:
+                    # Take top 50 components by weight to focus exposure
+                    filtered_weights = {ticker: component_weights[ticker] for ticker in valid_components}
+                    sorted_components = sorted(
+                        filtered_weights.items(), 
+                        key=lambda x: x[1], 
+                        reverse=True
+                    )
+                    valid_components = [comp[0] for comp in sorted_components[:50]]
+                
+                # Renormalize weights for selected components
+                total_weight = sum(component_weights[ticker] for ticker in valid_components)
+                normalized_weights = {
+                    ticker: component_weights[ticker] / total_weight for ticker in valid_components
+                }
+                
+                print(f"Trading with {len(valid_components)} weighted components")
+                
+            except Exception as e:
+                print(f"Error loading component weights: {e}. Using equal weighting.")
+                valid_components = self.component_tickers[:50]  # Limit to 50 components
+                normalized_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
+            
+            # Allocate the premium target across components based on their weights
+            premium_target_per_component = {
+                ticker: component_premium_target * normalized_weights[ticker]
+                for ticker in valid_components
+            }
+            
+            # Log the weighted allocation
+            print(f"Total target premium to collect: ${component_premium_target:,.2f}")
+            
+            for ticker in valid_components:
                 try:
                     comp_price = self._get_price_on_date(ticker, self.current_date)
                     comp_strike = round(comp_price)
+                    
+                    target_premium = premium_target_per_component[ticker]
+                    print(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
                     
                     # Price component call
                     comp_call_price = self._price_option(
@@ -820,19 +1285,44 @@ class BacktestEngine:
                         option_type='put'
                     )
                     
-                    # Safe calculation for component calls
-                    if comp_call_price > 0:
-                        comp_call_contracts = max(0, int(component_risk_allocation / (comp_call_price * 100) / 2))
-                    else:
-                        comp_call_contracts = 0
-                        print(f"Warning: Zero or invalid call price for {ticker}")
+                    # Calculate contracts needed to reach premium target (split between call and put)
+                    target_call_contracts = int(target_premium / 2 / (comp_call_price * 100))
+                    target_put_contracts = int(target_premium / 2 / (comp_put_price * 100))
                     
-                    # Safe calculation for component puts
-                    if comp_put_price > 0:
-                        comp_put_contracts = max(0, int(component_risk_allocation / (comp_put_price * 100) / 2))
-                    else:
-                        comp_put_contracts = 0
-                        print(f"Warning: Zero or invalid put price for {ticker}")
+                    # Ensure minimum of 1 contract if target is positive
+                    if target_call_contracts == 0 and target_premium > 0:
+                        target_call_contracts = 1
+                    if target_put_contracts == 0 and target_premium > 0:
+                        target_put_contracts = 1
+                    
+                    # Limit by risk manager
+                    risk_call_contracts = self.risk_manager.calculate_position_sizing(
+                        'reverse_dispersion', 
+                        ticker, 
+                        'call', 
+                        comp_call_price, 
+                        self.current_portfolio_value * normalized_weights[ticker]
+                    )
+                    
+                    risk_put_contracts = self.risk_manager.calculate_position_sizing(
+                        'reverse_dispersion', 
+                        ticker, 
+                        'put', 
+                        comp_put_price, 
+                        self.current_portfolio_value * normalized_weights[ticker]
+                    )
+                    
+                    # Use the minimum of target and risk-based sizing
+                    comp_call_contracts = min(target_call_contracts, risk_call_contracts)
+                    comp_put_contracts = min(target_put_contracts, risk_put_contracts)
+                    
+                    # Check if positions would exceed portfolio risk limits
+                    call_value = -comp_call_contracts * comp_call_price * 100  # Negative for short
+                    put_value = -comp_put_contracts * comp_put_price * 100     # Negative for short
+                    
+                    if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
+                        print(f"Skipping {ticker} component trade due to portfolio risk limits")
+                        continue
                     
                     # Execute the component trades (short)
                     if comp_call_contracts > 0:
@@ -845,6 +1335,9 @@ class BacktestEngine:
                             price=comp_call_price,
                             strategy='reverse_dispersion'
                         )
+                        premium_collected = comp_call_price * comp_call_contracts * 100
+                        total_premium_collected += premium_collected
+                        total_short_exposure += call_value
                     
                     if comp_put_contracts > 0:
                         self._open_option_position(
@@ -856,7 +1349,90 @@ class BacktestEngine:
                             price=comp_put_price,
                             strategy='reverse_dispersion'
                         )
+                        premium_collected = comp_put_price * comp_put_contracts * 100
+                        total_premium_collected += premium_collected
+                        total_short_exposure += put_value
                     
                 except Exception as e:
                     print(f"Error trading component {ticker}: {e}")
                     continue
+            
+            # Add the premium collected to our cash
+            self.current_cash += total_premium_collected
+            
+            # Verify final trade balance
+            print(f"Total long exposure (index options): ${total_long_exposure:,.2f}")
+            print(f"Total short exposure (component options): ${total_short_exposure:,.2f}")
+            print(f"Total premium collected: ${total_premium_collected:,.2f}")
+            
+            is_balanced = self.risk_manager.check_trade_balance(total_long_exposure, total_short_exposure)
+            if not is_balanced:
+                print(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
+                     f"{total_long_exposure/abs(total_short_exposure):.2f}")
+            else:
+                print("Trade exposure is balanced.")
+        else:
+            print("No component tickers available for reverse dispersion trade")
+
+    def _close_position(self, position_id, position, reason="manual"):
+        """Close a position at current market price"""
+        if position['status'] != 'open':
+            return
+            
+        ticker = position['ticker']
+        strike = position['strike_price']
+        option_type = position['option_type']
+        expiration_date = position['expiration_date']
+        quantity = position['quantity']
+        
+        try:
+            # Get current price
+            current_price = self._price_option(
+                ticker=ticker,
+                current_date=self.current_date,
+                expiration_date=expiration_date,
+                strike_price=strike,
+                option_type=option_type
+            )
+            
+            # Calculate value
+            position_value = -quantity * current_price * 100  # Negate quantity to reverse the position
+            
+            # Update cash
+            self.current_cash += position_value
+            
+            # Mark position as closed
+            position['status'] = 'closed'
+            position['exit_date'] = self.current_date
+            position['exit_price'] = current_price
+            position['exit_value'] = position_value
+            position['exit_reason'] = reason
+            
+            # Record the trade
+            self._record_trade(
+                ticker=ticker,
+                trade_type='close',
+                position_type='option',
+                quantity=-quantity,  # Negate to close the position
+                price=current_price,
+                value=position_value,
+                option_details={
+                    'strike': strike,
+                    'expiration': expiration_date,
+                    'option_type': option_type,
+                    'strategy': position['strategy'],
+                    'exit_reason': reason
+                }
+            )
+            
+            print(f"Closed position {position_id} ({ticker} {option_type}) due to {reason}")
+            
+        except Exception as e:
+            print(f"Error closing position {position_id}: {e}")
+
+    def _close_all_positions(self, reason="risk_limit"):
+        """Close all open positions"""
+        print(f"CLOSING ALL POSITIONS due to {reason}")
+        for position_id, position in list(self.positions.items()):
+            if position['status'] == 'open':
+                self._close_position(position_id, position, reason=reason)

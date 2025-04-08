@@ -134,7 +134,7 @@ def calculate_implied_volatilities(index_ticker, component_tickers, current_date
     # Initialize results dictionary
     implied_vols = {}
     
-    # Calculate implied vol for the index
+    # Calculate implied vol for the index with a higher minimum premium
     implied_vols[index_ticker] = calculate_vix_implied_volatility(index_ticker, current_date, lookback)
     
     # Calculate implied vol for each component

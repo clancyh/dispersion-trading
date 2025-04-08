@@ -26,7 +26,8 @@ def load_config(config_path='config.json'):
             "universe": {
                 "index": "SPY",
                 "num_stocks": 10,
-                "seed": 42
+                "seed": 42,
+                "repull_data": True
             }
         }
     except json.JSONDecodeError:
@@ -39,7 +40,8 @@ def load_config(config_path='config.json'):
             "universe": {
                 "index": "SPY",
                 "num_stocks": 10,
-                "seed": 42
+                "seed": 42,
+                "repull_data": True
             }
         }
 
@@ -52,6 +54,7 @@ end_date = config['backtest']['end_date']
 index = config['universe']['index']
 num_stocks = config['universe']['num_stocks']
 random_seed = config['universe'].get('seed', None)
+repull_data = config['universe'].get('repull_data', True)
 
 # Set random seed if specified
 if random_seed is not None:
@@ -97,18 +100,41 @@ def grab_data(symbols, start_date=None, end_date=None):
         print(f"Error running R script: {e}")
         raise
 
+# Function to check if data exists for all tickers
+def data_exists_for_tickers(tickers, index_ticker, vix=True):
+    all_tickers = tickers + [index_ticker]
+    if vix:
+        all_tickers.append("^VIX")
+    
+    for ticker in all_tickers:
+        data_file = f'data/processed/{ticker}.csv'
+        if not os.path.exists(data_file):
+            print(f"Missing data file for {ticker}")
+            return False
+    return True
+
 # Calculate extended start date (2 years before backtest start date)
 backtest_start = datetime.strptime(start_date, '%Y-%m-%d')
 extended_start = (backtest_start - timedelta(days=2*365)).strftime('%Y-%m-%d')
-print(f"Fetching index and VIX data with extended history (from {extended_start} to {end_date})")
 
-# Grab data for index ETF and VIX with extended history
-grab_data(f"{index},^VIX", extended_start, end_date)
-
-# Grab data for selected tickers (only for the backtest period)
-grab_data(",".join(selected_tickers), extended_start, end_date)
-
-# Data will be saved to data/processed/ directory as CSV files
-print(f"Universe setup complete. Selected tickers: {index} + {len(selected_tickers)} constituents")
-print(f"Date range for components: {start_date} to {end_date}")
-print(f"Extended date range for index and VIX: {extended_start} to {end_date}")
+# Check if we need to pull data
+if repull_data:
+    print(f"Fetching index and VIX data with extended history (from {extended_start} to {end_date})")
+    
+    # Grab data for index ETF and VIX with extended history
+    grab_data(f"{index},^VIX", extended_start, end_date)
+    
+    # Grab data for selected tickers (only for the backtest period)
+    grab_data(",".join(selected_tickers), extended_start, end_date)
+    
+    print(f"Universe setup complete. Selected tickers: {index} + {len(selected_tickers)} constituents")
+    print(f"Date range for components: {start_date} to {end_date}")
+    print(f"Extended date range for index and VIX: {extended_start} to {end_date}")
+else:
+    print("Using existing data files (repull_data = False)")
+    
+    # Verify that all required data files exist
+    if not data_exists_for_tickers(selected_tickers, index):
+        print("WARNING: Some required data files are missing! Consider setting repull_data to True.")
+    else:
+        print(f"All required data files found for {index} + {len(selected_tickers)} constituents")

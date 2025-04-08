@@ -26,6 +26,13 @@ def main():
     print(f"Max Drawdown: {metrics['max_drawdown']:.2%}")
     print(f"Final Portfolio Value: ${metrics['final_value']:.2f}")
     
+    # Display risk metrics
+    print("\nRisk Metrics:")
+    print(f"Average Exposure: {metrics['avg_exposure']:.2%} of portfolio")
+    print(f"Maximum Exposure: {metrics['max_exposure']:.2%} of portfolio")
+    print(f"Max Allowed Drawdown: {config['risk_management']['max_drawdown_pct']:.2%}")
+    print(f"Stop-Loss Level: {config['risk_management']['stop_loss_pct']:.2%}")
+    
     # Plot results
     engine.plot_results()
     
@@ -47,7 +54,13 @@ def main():
         f.write(f"Annualized Return: {metrics['annualized_return']:.2%}\n")
         f.write(f"Annualized Volatility: {metrics['annualized_volatility']:.2%}\n")
         f.write(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}\n")
-        f.write(f"Max Drawdown: {metrics['max_drawdown']:.2%}\n")
+        f.write(f"Max Drawdown: {metrics['max_drawdown']:.2%}\n\n")
+        f.write("Risk Management Settings:\n")
+        f.write(f"Position Sizing Method: {config['risk_management']['position_sizing_method']}\n")
+        f.write(f"Max Portfolio Risk: {config['risk_management']['max_portfolio_risk_pct']:.2%}\n")
+        f.write(f"Max Position Risk: {config['risk_management']['max_position_risk_pct']:.2%}\n")
+        f.write(f"Stop-Loss Level: {config['risk_management']['stop_loss_pct']:.2%}\n")
+        f.write(f"Max Drawdown Limit: {config['risk_management']['max_drawdown_pct']:.2%}\n")
     
     print(f"\nResults saved to {results_dir}")
 
