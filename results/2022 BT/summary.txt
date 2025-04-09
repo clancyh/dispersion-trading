@@ -1,0 +1,21 @@
+Backtest Summary
+===============
+
+Start Date: 2022-01-01
+End Date: 2022-12-31
+Initial Capital: $1000000
+Final Capital: $1456947.57
+
+Performance Metrics:
+Total Return: 45.69%
+Annualized Return: 46.08%
+Annualized Volatility: 35.07%
+Sharpe Ratio: 1.31
+Max Drawdown: 0.00%
+
+Risk Management Settings:
+Position Sizing Method: equal_risk
+Max Portfolio Risk: 15.00%
+Max Position Risk: 3.00%
+Stop-Loss Level: 10.00%
+Max Drawdown Limit: 15.00%

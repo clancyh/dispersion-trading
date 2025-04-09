@@ -208,6 +208,8 @@ def calculate_correlation_dispersion(index_ticker, component_tickers, current_da
         lookback=lookback
     )
     
+    print(f"Implied correlation: {implied_corr:.4f}")
+
     # Calculate realized correlation
     realized_corr = calculate_average_realized_correlation(
         component_tickers,
@@ -217,6 +219,9 @@ def calculate_correlation_dispersion(index_ticker, component_tickers, current_da
     
     # Calculate dispersion (implied minus realized)
     dispersion = implied_corr - realized_corr
+    
+    print(f"Realized correlation: {realized_corr:.4f}")
+    print(f"Correlation dispersion: {dispersion:.4f}")
     
     # Return all metrics
     return {

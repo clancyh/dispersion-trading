@@ -65,7 +65,6 @@ def price_options(ticker, current_date, expiration_date, strike_price, option_ty
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Historical data for {ticker} not found. Please run datagrab.r first.")
     
-    print(f"Pricing options for {ticker} on {current_date} to {expiration_date}")
     
     # Load the historical data for the ticker
     data = pd.read_csv(data_file)

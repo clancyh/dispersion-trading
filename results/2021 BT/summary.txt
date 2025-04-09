@@ -1,0 +1,21 @@
+Backtest Summary
+===============
+
+Start Date: 2021-02-01
+End Date: 2021-12-31
+Initial Capital: $1000000
+Final Capital: $2239205.65
+
+Performance Metrics:
+Total Return: 123.92%
+Annualized Return: 95.84%
+Annualized Volatility: 40.02%
+Sharpe Ratio: 2.40
+Max Drawdown: 0.00%
+
+Risk Management Settings:
+Position Sizing Method: equal_risk
+Max Portfolio Risk: 15.00%
+Max Position Risk: 3.00%
+Stop-Loss Level: 10.00%
+Max Drawdown Limit: 15.00%
