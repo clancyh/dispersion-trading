@@ -5,6 +5,7 @@ from backtester.correlation import calculate_correlation_dispersion
 from backtester.options_pricer import price_options
 from backtester.dspx import load_dspx_data, calculate_dspx_signal
 from backtester.risk_manager import RiskManager
+from backtester.logger import BacktestLogger
 import numpy as np
 from .weights import load_index_weights
 
@@ -15,6 +16,9 @@ class BacktestEngine:
         self.start_date = config['backtest']['start_date']
         self.end_date = config['backtest']['end_date']
         self.initial_cash = config['portfolio']['initial_cash']
+        
+        # Initialize logger
+        self.logger = BacktestLogger(config)
         
         # Portfolio state
         self.current_date = None
@@ -27,6 +31,7 @@ class BacktestEngine:
         
         # Initialize risk manager
         self.risk_manager = RiskManager(config)
+        self.risk_manager.set_logger(self.logger)
         
         # Initialize data
         self._load_data()
@@ -75,7 +80,7 @@ class BacktestEngine:
             
             self.price_data['^VIX'] = vix_data
         else:
-            print("Warning: VIX data not found. Implied volatility calculations will use historical volatility.")
+            self.logger.warning("VIX data not found. Implied volatility calculations will use historical volatility.")
         
         # Set up component universe
         if self.config['universe']['random_selection']:
@@ -109,7 +114,7 @@ class BacktestEngine:
         for ticker in self.component_tickers:
             stock_file = f"{self.config['paths']['data_dir']}{ticker}.csv"
             if not os.path.exists(stock_file):
-                print(f"Warning: Data for {ticker} not found, excluding from universe.")
+                self.logger.warning(f"Data for {ticker} not found, excluding from universe.")
                 continue
             
             stock_data = pd.read_csv(stock_file)
@@ -125,7 +130,7 @@ class BacktestEngine:
             # Ensure stock has data for all trading dates
             stock_dates = set(stock_data['date'].dt.date)
             if len(stock_dates.intersection(valid_trading_dates)) < len(valid_trading_dates) * 0.9:
-                print(f"Warning: {ticker} has insufficient data coverage, excluding from universe.")
+                self.logger.warning(f"{ticker} has insufficient data coverage, excluding from universe.")
                 continue
             
             self.price_data[ticker] = stock_data
@@ -133,7 +138,7 @@ class BacktestEngine:
         
         # Update component tickers to only include valid ones
         self.component_tickers = valid_components
-        print(f"Using {len(self.component_tickers)} components for dispersion trading.")
+        self.logger.info(f"Using {len(self.component_tickers)} components for dispersion trading.")
         
         # Ensure all data sources have the same trading days
         # Get intersection of all available dates
@@ -152,12 +157,12 @@ class BacktestEngine:
         
         # Load DSPX data if available
         try:
-            self.dspx_data = load_dspx_data()
+            self.dspx_data = load_dspx_data(logger=self.logger)
             # Ensure DSPX data only includes available trading dates
             self.dspx_data = self.dspx_data[self.dspx_data['date'].dt.date.isin(common_dates)]
-            print(f"Loaded DSPX data with {len(self.dspx_data)} entries.")
+            self.logger.info(f"Loaded DSPX data with {len(self.dspx_data)} entries.")
         except Exception as e:
-            print(f"Warning: Could not load DSPX data: {e}")
+            self.logger.warning(f"Could not load DSPX data: {e}")
             self.dspx_data = None
         
     def _build_date_range(self):
@@ -179,8 +184,8 @@ class BacktestEngine:
     
     def run(self):
         """Run the backtest"""
-        print(f"Starting backtest from {self.start_date} to {self.end_date}")
-        print(f"Trading universe: {self.index_ticker} and {len(self.component_tickers)} components")
+        self.logger.info(f"Starting backtest from {self.start_date} to {self.end_date}")
+        self.logger.info(f"Trading universe: {self.index_ticker} and {len(self.component_tickers)} components")
         
         # Initialize portfolio
         self.current_cash = self.initial_cash
@@ -191,6 +196,7 @@ class BacktestEngine:
         # Iterate through each trading day
         for date in self.trading_dates:
             self.current_date = date
+            self.logger.update_date(date)
             self._process_trading_day()
             
         # Calculate final performance metrics
@@ -213,7 +219,7 @@ class BacktestEngine:
             if self.risk_manager.can_enter_new_trades(self.current_date):
                 signals = self._generate_signals(self.current_date)
             else:
-                print(f"Not generating signals on {self.current_date} due to risk management constraints")
+                self.logger.debug(f"Not generating signals on {self.current_date} due to risk management constraints")
         
         # 4. Execute trades based on signals
         if signals:
@@ -287,7 +293,7 @@ class BacktestEngine:
                 return quantity * option_price * 100  # Standard options contracts are for 100 shares
             
             except Exception as e:
-                print(f"Error pricing option {position_id}: {e}")
+                self.logger.error(f"Error pricing option {position_id}: {e}")
                 return position['current_value']  # Return previous value if error
     
     def _get_price_on_date(self, ticker, date):
@@ -357,44 +363,62 @@ class BacktestEngine:
         )
     
     def _generate_signals(self, current_date):
-        """Generate trading signals based on market conditions"""
+        """Generate trading signals for the current date"""
+        signals = {'signal': None, 'metrics': {}}
+        
         try:
-            # Skip if we're testing with too few components
-            if len(self.component_tickers) <= 1:
-                return None
-                
-            # Convert date to datetime for proper comparison
-            current_datetime = datetime.combine(current_date, datetime.min.time())
+            # Check if we already have dispersion positions open
+            has_open_positions = self._has_open_dispersion_positions()
             
-            # Use DSPX data to generate signals
-            entry_threshold = self.config['dispersion']['entry_threshold']
-            exit_threshold = self.config['dispersion']['exit_threshold']
-            lookback = self.config['options']['volatility_lookback']
-            
-            # Calculate signals based on DSPX
-            signal = calculate_dspx_signal(
-                self.dspx_data,
-                current_datetime,
-                lookback=lookback,
-                entry_threshold=entry_threshold,
-                exit_threshold=exit_threshold
-            )
-            
-            # Only generate EXIT signal if we have open positions
-            if signal and signal['signal'] == 'EXIT' and not self._has_open_dispersion_positions():
-                return None
+            # If DSPX data is available, use it for signals
+            if self.dspx_data is not None:
+                signal_data = calculate_dspx_signal(
+                    self.dspx_data, 
+                    current_date,
+                    self.config['dispersion']['entry_threshold'],
+                    self.config['dispersion']['exit_threshold'],
+                    self.config['dispersion']['dspx_lookback']
+                )
                 
-            # Print some information about the signal
-            if signal:
-                print(f"DSPX Signal on {current_date}: {signal['signal']}")
-                print(f"DSPX Value: {signal['metrics']['dspx_value']:.2f}, Z-Score: {signal['metrics']['z_score']:.2f}")
+                signals['signal'] = signal_data['signal']
+                signals['metrics'] = signal_data['metrics']
                 
-            return signal
+                # Log the signal
+                self.logger.log_signal(signals['signal'], signals['metrics'])
+                
+            else:
+                # If no DSPX data, use correlation dispersion to generate signals
+                # Implement this if DSPX data is not available
+                self.logger.warning("No DSPX data available. Using basic correlation signal.")
+                
+                # Simple implementation of correlation-based signal
+                # This is a placeholder and should be enhanced
+                dispersion = calculate_correlation_dispersion(
+                    self.price_data, 
+                    self.component_tickers, 
+                    self.index_ticker, 
+                    current_date, 
+                    30  # lookback period
+                )
+                
+                # Convert dispersion to signal
+                if dispersion > 0.2 and not has_open_positions:
+                    signals['signal'] = 'ENTER_DISPERSION'
+                elif dispersion < 0.1 and has_open_positions:
+                    signals['signal'] = 'EXIT'
+                else:
+                    signals['signal'] = 'HOLD'
+                
+                signals['metrics'] = {'dispersion': dispersion}
+                
+                # Log the signal
+                self.logger.log_signal(signals['signal'], signals['metrics'])
+            
+            return signals
             
         except Exception as e:
-            print(f"Error generating signals on {current_date}: {e}")
-            
-        return None
+            self.logger.error(f"Error generating signals on {current_date}: {e}")
+            return {'signal': 'HOLD', 'metrics': {}}
     
     def _has_open_dispersion_positions(self):
         """Check if there are open dispersion positions"""
@@ -408,12 +432,12 @@ class BacktestEngine:
         # Only execute trades if risk manager allows it
         if not self.risk_manager.can_enter_new_trades(current_date):
             if self.risk_manager.hard_recovery_mode:
-                print(f"In hard recovery mode - not executing any new trades.")
+                self.logger.info("In hard recovery mode - not executing any new trades.")
             elif self.risk_manager.soft_recovery_mode:
-                print(f"In soft recovery mode - executing trades at reduced size.")
+                self.logger.info("In soft recovery mode - executing trades at reduced size.")
                 # Continue with execution
             else:
-                print(f"Risk constraints prevent entering new trades.")
+                self.logger.info("Risk constraints prevent entering new trades.")
             return
         
         # Implementation will vary based on your specific strategy requirements
@@ -441,13 +465,13 @@ class BacktestEngine:
         # Find the nearest valid trading day to our target expiry
         valid_expiry_days = [d for d in self.trading_dates if d > self.current_date]
         if not valid_expiry_days:
-            print(f"No valid expiry dates available after {self.current_date}")
+            self.logger.warning(f"No valid expiry dates available after {self.current_date}")
             return
             
         # Use an expiry date that's at least 7 days in the future
         future_dates = [d for d in valid_expiry_days if (d - self.current_date).days >= 7]
         if not future_dates:
-            print(f"No valid expiry dates at least 7 days after {self.current_date}")
+            self.logger.warning(f"No valid expiry dates at least 7 days after {self.current_date}")
             return
             
         # Choose the closest date to our target that's at least 7 days out
@@ -456,7 +480,7 @@ class BacktestEngine:
         
         # Log the expiration we're using
         days_to_expiry = (expiration_date - self.current_date).days
-        print(f"Setting up dispersion trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
+        self.logger.info(f"Setting up dispersion trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
         
         # Track exposures
         total_short_exposure = 0
@@ -507,7 +531,7 @@ class BacktestEngine:
             put_value = -index_put_contracts * index_put_price * 100     # Negative for short
             
             if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
-                print("Skipping trade due to portfolio risk limits")
+                self.logger.info("Skipping trade due to portfolio risk limits")
                 return
             
             # Execute the index trades (short)
@@ -543,19 +567,19 @@ class BacktestEngine:
             self.current_cash += premium_collected
             
             # Log the amount collected from shorting index options
-            print(f"Premium collected from index options: ${premium_collected:,.2f}")
-            print(f"Total short exposure: ${total_short_exposure:,.2f}")
+            self.logger.info(f"Premium collected from index options: ${premium_collected:,.2f}")
+            self.logger.info(f"Total short exposure: ${total_short_exposure:,.2f}")
             
             # If no premium was collected, exit
             if premium_collected <= 0:
-                print("No premium collected. Skipping component trades.")
+                self.logger.info("No premium collected. Skipping component trades.")
                 return
             
             # Use the risk manager to calculate a balanced component budget based on the premium collected
             component_premium_target = premium_collected * self.risk_manager.long_short_balance_factor
             
         except Exception as e:
-            print(f"Error pricing index options: {e}")
+            self.logger.error(f"Error pricing index options: {e}")
             return
         
         # 3. Long the component options (ATM straddles)
@@ -567,13 +591,13 @@ class BacktestEngine:
             # Load component weights from S&P 500 constituents file
             try:
                 component_weights = load_index_weights(self.index_ticker)
-                print(f"Loaded weights for {len(component_weights)} constituents")
+                self.logger.info(f"Loaded weights for {len(component_weights)} constituents")
                 
                 # Filter to only include components in our universe
                 valid_components = [ticker for ticker in self.component_tickers if ticker in component_weights]
                 
                 if len(valid_components) < 20:
-                    print(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
+                    self.logger.warning(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
                     # Sort the component tickers by weight (descending)
                     sorted_components = sorted(
                         component_weights.items(), 
@@ -606,10 +630,10 @@ class BacktestEngine:
                     ticker: component_weights[ticker] / total_weight for ticker in valid_components
                 }
                 
-                print(f"Trading with {len(valid_components)} weighted components")
+                self.logger.info(f"Trading with {len(valid_components)} weighted components")
                 
             except Exception as e:
-                print(f"Error loading component weights: {e}. Using equal weighting.")
+                self.logger.error(f"Error loading component weights: {e}. Using equal weighting.")
                 valid_components = self.component_tickers[:50]  # Limit to 50 components
                 normalized_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
             
@@ -620,7 +644,7 @@ class BacktestEngine:
             }
             
             # Log the weighted allocation
-            print(f"Total target premium to spend: ${component_premium_target:,.2f}")
+            self.logger.info(f"Total target premium to spend: ${component_premium_target:,.2f}")
             
             for ticker in valid_components:
                 try:
@@ -628,7 +652,7 @@ class BacktestEngine:
                     comp_strike = round(comp_price)
                     
                     target_premium = premium_target_per_component[ticker]
-                    print(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
+                    self.logger.info(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
                     
                     # Price component call
                     comp_call_price = self._price_option(
@@ -684,7 +708,7 @@ class BacktestEngine:
                     put_value = comp_put_contracts * comp_put_price * 100
                     
                     if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
-                        print(f"Skipping {ticker} component trade due to portfolio risk limits")
+                        self.logger.info(f"Skipping {ticker} component trade due to portfolio risk limits")
                         continue
                     
                     # Execute the component trades (long)
@@ -717,25 +741,34 @@ class BacktestEngine:
                         total_long_exposure += put_value
                     
                 except Exception as e:
-                    print(f"Error trading component {ticker}: {e}")
+                    self.logger.error(f"Error trading component {ticker}: {e}")
                     continue
             
             # Deduct the premium spent from our cash
             self.current_cash -= total_premium_spent
             
             # Verify final trade balance
-            print(f"Total short exposure (index options): ${total_short_exposure:,.2f}")
-            print(f"Total long exposure (component options): ${total_long_exposure:,.2f}")
-            print(f"Total premium spent: ${total_premium_spent:,.2f}")
+            self.logger.info(f"Total short exposure (index options): ${total_short_exposure:,.2f}")
+            self.logger.info(f"Total long exposure (component options): ${total_long_exposure:,.2f}")
+            self.logger.info(f"Total premium spent: ${total_premium_spent:,.2f}")
             
             is_balanced = self.risk_manager.check_trade_balance(total_long_exposure, total_short_exposure)
+            
+            # Log dispersion trade status
+            exposure_info = {
+                'short_exposure': total_short_exposure,
+                'long_exposure': total_long_exposure,
+                'premium': total_premium_spent
+            }
+            self.logger.log_dispersion_trade_status(exposure_info, is_balanced)
+            
             if not is_balanced:
-                print(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
-                     f"{total_long_exposure/abs(total_short_exposure):.2f}")
+                self.logger.warning(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
+                      f"{total_long_exposure/abs(total_short_exposure):.2f}")
             else:
-                print("Trade exposure is balanced.")
+                self.logger.info("Trade exposure is balanced.")
         else:
-            print("No component tickers available for dispersion trade")
+            self.logger.info("No component tickers available for dispersion trade")
     
     def _price_option(self, ticker, current_date, expiration_date, strike_price, option_type):
         """Price an option using the configured pricing model"""
@@ -762,13 +795,13 @@ class BacktestEngine:
             
             # Ensure price is a valid number
             if np.isnan(price) or np.isinf(price) or price <= 0:
-                print(f"Warning: Invalid option price for {ticker} {option_type} (${strike_price}): {price}")
+                self.logger.warning(f"Warning: Invalid option price for {ticker} {option_type} (${strike_price}): {price}")
                 return 0.01  # Return a small positive value as fallback
             
             return price
         
         except Exception as e:
-            print(f"Error pricing option {ticker} {option_type} (${strike_price}): {e}")
+            self.logger.error(f"Error pricing option {ticker} {option_type} (${strike_price}): {e}")
             return 0.01  # Return a small positive value as fallback
     
     def _open_option_position(self, ticker, quantity, strike_price, expiration_date, 
@@ -888,24 +921,33 @@ class BacktestEngine:
                     )
                     
                 except Exception as e:
-                    print(f"Error closing position {position_id}: {e}")
+                    self.logger.error(f"Error closing position {position_id}: {e}")
     
     def _record_trade(self, ticker, trade_type, position_type, quantity, price, value, option_details=None):
         """Record a trade in the trade history"""
         trade = {
             'date': self.current_date,
             'ticker': ticker,
-            'trade_type': trade_type,  # 'open' or 'close'
-            'position_type': position_type,  # 'stock' or 'option'
+            'trade_type': trade_type,  # 'buy' or 'sell'
+            'position_type': position_type,  # 'long' or 'short'
             'quantity': quantity,
             'price': price,
-            'value': value
+            'value': value,
+            'option_details': option_details,
         }
         
-        if option_details:
-            trade.update(option_details)
-        
         self.trade_history.append(trade)
+        
+        # Log the trade
+        self.logger.log_trade(
+            ticker, 
+            trade_type, 
+            position_type,
+            quantity, 
+            price, 
+            value, 
+            option_details
+        )
     
     def _record_portfolio_value(self):
         """Record the current portfolio value and risk metrics"""
@@ -955,6 +997,15 @@ class BacktestEngine:
         }
         
         self.portfolio_history.append(portfolio_entry)
+        
+        # Log portfolio update
+        self.logger.log_portfolio_update(
+            self.current_portfolio_value,
+            self.current_cash,
+            total_long_exposure,
+            total_short_exposure,
+            drawdown
+        )
     
     def _calculate_performance(self):
         """Calculate performance metrics for the backtest"""
@@ -963,8 +1014,6 @@ class BacktestEngine:
         
         # Convert portfolio history to DataFrame
         portfolio_df = pd.DataFrame(self.portfolio_history)
-        
-        print("Available columns in portfolio_df:", portfolio_df.columns.tolist())
         # Now you'll see what columns are available to use instead of 'value'
         portfolio_df['return'] = portfolio_df['value'].pct_change()  # This line will still fail
         
@@ -1080,13 +1129,13 @@ class BacktestEngine:
         # Find the nearest valid trading day to our target expiry
         valid_expiry_days = [d for d in self.trading_dates if d > self.current_date]
         if not valid_expiry_days:
-            print(f"No valid expiry dates available after {self.current_date}")
+            self.logger.warning(f"No valid expiry dates available after {self.current_date}")
             return
             
         # Use an expiry date that's at least 7 days in the future
         future_dates = [d for d in valid_expiry_days if (d - self.current_date).days >= 7]
         if not future_dates:
-            print(f"No valid expiry dates at least 7 days after {self.current_date}")
+            self.logger.warning(f"No valid expiry dates at least 7 days after {self.current_date}")
             return
             
         # Choose the closest date to our target that's at least 7 days out
@@ -1095,7 +1144,7 @@ class BacktestEngine:
         
         # Log the expiration we're using
         days_to_expiry = (expiration_date - self.current_date).days
-        print(f"Setting up reverse trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
+        self.logger.info(f"Setting up reverse trade with {days_to_expiry} days to expiration (from {self.current_date} to {expiration_date})")
         
         # Track exposures
         total_long_exposure = 0
@@ -1146,7 +1195,7 @@ class BacktestEngine:
             put_value = index_put_contracts * index_put_price * 100
             
             if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
-                print("Skipping trade due to portfolio risk limits")
+                self.logger.info("Skipping trade due to portfolio risk limits")
                 return
             
             # Execute the index trades (long)
@@ -1179,12 +1228,12 @@ class BacktestEngine:
                          index_put_price * index_put_contracts) * 100
             
             # Log the amount spent on index options
-            print(f"Total spent on index options: ${index_cost:,.2f}")
-            print(f"Total long exposure: ${total_long_exposure:,.2f}")
+            self.logger.info(f"Total spent on index options: ${index_cost:,.2f}")
+            self.logger.info(f"Total long exposure: ${total_long_exposure:,.2f}")
             
             # If no index options were purchased, exit
             if total_long_exposure <= 0:
-                print("No index options purchased. Skipping component trades.")
+                self.logger.info("No index options purchased. Skipping component trades.")
                 return
             
             # Use the risk manager to calculate a balanced component budget 
@@ -1192,7 +1241,7 @@ class BacktestEngine:
             component_premium_target = total_long_exposure / self.risk_manager.long_short_balance_factor
             
         except Exception as e:
-            print(f"Error pricing index options: {e}")
+            self.logger.error(f"Error pricing index options: {e}")
             return
         
         # 3. Short the component options (ATM straddles)
@@ -1204,13 +1253,13 @@ class BacktestEngine:
             # Load component weights from S&P 500 constituents file
             try:
                 component_weights = load_index_weights(self.index_ticker)
-                print(f"Loaded weights for {len(component_weights)} constituents")
+                self.logger.info(f"Loaded weights for {len(component_weights)} constituents")
                 
                 # Filter to only include components in our universe
                 valid_components = [ticker for ticker in self.component_tickers if ticker in component_weights]
                 
                 if len(valid_components) < 20:
-                    print(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
+                    self.logger.warning(f"Warning: Only {len(valid_components)} components with weights. Using top components.")
                     # Sort the component tickers by weight (descending)
                     sorted_components = sorted(
                         component_weights.items(), 
@@ -1243,10 +1292,10 @@ class BacktestEngine:
                     ticker: component_weights[ticker] / total_weight for ticker in valid_components
                 }
                 
-                print(f"Trading with {len(valid_components)} weighted components")
+                self.logger.info(f"Trading with {len(valid_components)} weighted components")
                 
             except Exception as e:
-                print(f"Error loading component weights: {e}. Using equal weighting.")
+                self.logger.error(f"Error loading component weights: {e}. Using equal weighting.")
                 valid_components = self.component_tickers[:50]  # Limit to 50 components
                 normalized_weights = {ticker: 1.0/len(valid_components) for ticker in valid_components}
             
@@ -1257,7 +1306,7 @@ class BacktestEngine:
             }
             
             # Log the weighted allocation
-            print(f"Total target premium to collect: ${component_premium_target:,.2f}")
+            self.logger.info(f"Total target premium to collect: ${component_premium_target:,.2f}")
             
             for ticker in valid_components:
                 try:
@@ -1265,7 +1314,7 @@ class BacktestEngine:
                     comp_strike = round(comp_price)
                     
                     target_premium = premium_target_per_component[ticker]
-                    print(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
+                    self.logger.info(f"Target premium for {ticker} (weight {normalized_weights[ticker]:.2%}): ${target_premium:,.2f}")
                     
                     # Price component call
                     comp_call_price = self._price_option(
@@ -1321,7 +1370,7 @@ class BacktestEngine:
                     put_value = -comp_put_contracts * comp_put_price * 100     # Negative for short
                     
                     if not self.risk_manager.check_portfolio_risk(call_value + put_value, self.current_portfolio_value):
-                        print(f"Skipping {ticker} component trade due to portfolio risk limits")
+                        self.logger.info(f"Skipping {ticker} component trade due to portfolio risk limits")
                         continue
                     
                     # Execute the component trades (short)
@@ -1354,25 +1403,34 @@ class BacktestEngine:
                         total_short_exposure += put_value
                     
                 except Exception as e:
-                    print(f"Error trading component {ticker}: {e}")
+                    self.logger.error(f"Error trading component {ticker}: {e}")
                     continue
             
             # Add the premium collected to our cash
             self.current_cash += total_premium_collected
             
             # Verify final trade balance
-            print(f"Total long exposure (index options): ${total_long_exposure:,.2f}")
-            print(f"Total short exposure (component options): ${total_short_exposure:,.2f}")
-            print(f"Total premium collected: ${total_premium_collected:,.2f}")
+            self.logger.info(f"Total long exposure (index options): ${total_long_exposure:,.2f}")
+            self.logger.info(f"Total short exposure (component options): ${total_short_exposure:,.2f}")
+            self.logger.info(f"Total premium collected: ${total_premium_collected:,.2f}")
             
             is_balanced = self.risk_manager.check_trade_balance(total_long_exposure, total_short_exposure)
+            
+            # Log dispersion trade status
+            exposure_info = {
+                'short_exposure': total_short_exposure,
+                'long_exposure': total_long_exposure,
+                'premium': total_premium_collected
+            }
+            self.logger.log_dispersion_trade_status(exposure_info, is_balanced)
+            
             if not is_balanced:
-                print(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
-                     f"{total_long_exposure/abs(total_short_exposure):.2f}")
+                self.logger.warning(f"WARNING: Trade exposure is not balanced. Long/Short ratio: " +
+                      f"{total_long_exposure/abs(total_short_exposure):.2f}")
             else:
-                print("Trade exposure is balanced.")
+                self.logger.info("Trade exposure is balanced.")
         else:
-            print("No component tickers available for reverse dispersion trade")
+            self.logger.info("No component tickers available for reverse dispersion trade")
 
     def _close_position(self, position_id, position, reason="manual"):
         """Close a position at current market price"""
@@ -1425,14 +1483,14 @@ class BacktestEngine:
                 }
             )
             
-            print(f"Closed position {position_id} ({ticker} {option_type}) due to {reason}")
+            self.logger.info(f"Closed position {position_id} ({ticker} {option_type}) due to {reason}")
             
         except Exception as e:
-            print(f"Error closing position {position_id}: {e}")
+            self.logger.error(f"Error closing position {position_id}: {e}")
 
     def _close_all_positions(self, reason="risk_limit"):
         """Close all open positions"""
-        print(f"CLOSING ALL POSITIONS due to {reason}")
+        self.logger.warning(f"CLOSING ALL POSITIONS due to {reason}")
         for position_id, position in list(self.positions.items()):
             if position['status'] == 'open':
                 self._close_position(position_id, position, reason=reason)

@@ -58,6 +58,13 @@ class RiskManager:
         self.soft_recovery_mode = False  # Reduced position sizing
         self.recovery_scaling_factor = 0.5  # Position size reduction during soft recovery
         
+        # Logger will be set later by the backtest engine
+        self.logger = None
+        
+    def set_logger(self, logger):
+        """Set the logger instance for this risk manager"""
+        self.logger = logger
+        
     def set_portfolio_value(self, value, current_date=None):
         """
         Update the current portfolio value and calculate drawdown
@@ -95,7 +102,8 @@ class RiskManager:
             
             # Check for full recovery (returning to previous peak)
             if value >= self.peak_portfolio_value:
-                print(f"Full recovery complete: Portfolio value (${value:,.2f}) exceeds previous peak (${self.peak_portfolio_value:,.2f}). Resuming normal trading.")
+                if self.logger:
+                    self.logger.info(f"Full recovery complete: Portfolio value (${value:,.2f}) exceeds previous peak (${self.peak_portfolio_value:,.2f}). Resuming normal trading.")
                 # Exit all recovery modes
                 self.recovery_mode = False
                 self.hard_recovery_mode = False
@@ -106,22 +114,24 @@ class RiskManager:
             
             # Check for transition from hard to soft recovery mode after cooling period
             elif self.hard_recovery_mode and days_in_recovery >= self.recovery_days:
-                print(f"Transitioning to soft recovery mode after {days_in_recovery} days. Resuming trading with reduced risk.")
+                if self.logger:
+                    self.logger.info(f"Transitioning to soft recovery mode after {days_in_recovery} days. Resuming trading with reduced risk.")
                 self.hard_recovery_mode = False
                 self.soft_recovery_mode = True
                 return True
             
             # Still in recovery mode
-            if days_in_recovery % 5 == 0:  # Only log every 5 days
+            if days_in_recovery % 5 == 0 and self.logger:  # Only log every 5 days
                 mode_status = "HARD" if self.hard_recovery_mode else "SOFT"
-                print(f"In {mode_status} recovery mode: Day {days_in_recovery}. Value: ${value:,.2f}, Peak: ${self.peak_portfolio_value:,.2f}, Progress: {recovery_progress:.2%}")
+                self.logger.info(f"In {mode_status} recovery mode: Day {days_in_recovery}. Value: ${value:,.2f}, Peak: ${self.peak_portfolio_value:,.2f}, Progress: {recovery_progress:.2%}")
             
             # Return trading permission based on recovery mode
             return not self.hard_recovery_mode
         
         # Check if drawdown exceeds maximum allowed
         if self.risk_enabled and self.current_drawdown > self.max_drawdown_pct and not self.max_drawdown_hit:
-            print(f"WARNING: Maximum drawdown exceeded: {self.current_drawdown:.2%} > {self.max_drawdown_pct:.2%}")
+            if self.logger:
+                self.logger.warning(f"Maximum drawdown exceeded: {self.current_drawdown:.2%} > {self.max_drawdown_pct:.2%}")
             self.max_drawdown_hit = True
             
             if current_date is not None:
@@ -139,9 +149,10 @@ class RiskManager:
                 recovery_amount = drawdown_amount * self.recovery_pct
                 self.recovery_target_value = value + recovery_amount
                 
-                print(f"Entering hard recovery mode. Current value: ${value:,.2f}, Peak: ${self.peak_portfolio_value:,.2f}")
-                print(f"Initial cooling period: {self.recovery_days} trading days")
-                print(f"Full recovery target: ${self.peak_portfolio_value:,.2f}")
+                if self.logger:
+                    self.logger.warning(f"Entering hard recovery mode. Current value: ${value:,.2f}, Peak: ${self.peak_portfolio_value:,.2f}")
+                    self.logger.info(f"Initial cooling period: {self.recovery_days} trading days")
+                    self.logger.info(f"Full recovery target: ${self.peak_portfolio_value:,.2f}")
                 
             return False
         
@@ -165,12 +176,14 @@ class RiskManager:
             
         # Check drawdown against limit - note we only force close when first hitting max drawdown
         if self.current_drawdown > self.max_drawdown_pct and not self.max_drawdown_hit:
-            print(f"ALERT: Closing all positions due to maximum drawdown: {self.current_drawdown:.2%}")
+            if self.logger:
+                self.logger.warning(f"Closing all positions due to maximum drawdown: {self.current_drawdown:.2%}")
             return True
             
         # Check if portfolio value has dropped below a threshold
         if self.current_portfolio_value < 0.5 * self.initial_portfolio_value:
-            print(f"ALERT: Closing all positions due to significant portfolio value drop")
+            if self.logger:
+                self.logger.warning(f"Closing all positions due to significant portfolio value drop")
             return True
             
         return False
@@ -195,7 +208,8 @@ class RiskManager:
             if current_date is not None and self.max_drawdown_date is not None:
                 days_in_recovery = (current_date - self.max_drawdown_date).days
                 
-            print(f"In hard recovery mode (Day {days_in_recovery}/{self.recovery_days}). Not entering new trades.")
+            if self.logger:
+                self.logger.info(f"In hard recovery mode (Day {days_in_recovery}/{self.recovery_days}). Not entering new trades.")
             return False
             
         # Allow trades during soft recovery mode (risk adjustment happens in position sizing)
@@ -238,7 +252,8 @@ class RiskManager:
         
         # Check if loss exceeds stop-loss percentage
         if profit_loss_pct < -self.stop_loss_pct:
-            print(f"Stop-loss triggered for {position['ticker']} {position['option_type']} option: {profit_loss_pct:.2%}")
+            if self.logger:
+                self.logger.warning(f"Stop-loss triggered for {position['ticker']} {position['option_type']} option: {profit_loss_pct:.2%}")
             return True
             
         return False
@@ -297,7 +312,8 @@ class RiskManager:
         # Apply scaling factor during soft recovery mode
         if self.soft_recovery_mode:
             contracts = int(contracts * self.recovery_scaling_factor)
-            print(f"Soft recovery mode: Reducing position size by {(1-self.recovery_scaling_factor)*100:.0f}%")
+            if self.logger:
+                self.logger.info(f"Soft recovery mode: Reducing position size by {(1-self.recovery_scaling_factor)*100:.0f}%")
         
         return contracts
     
@@ -329,7 +345,8 @@ class RiskManager:
         
         # Check if total risk exceeds maximum allowed
         if total_risk > self.max_portfolio_risk_pct:
-            print(f"WARNING: Adding position would exceed portfolio risk limit: {total_risk:.2%} > {self.max_portfolio_risk_pct:.2%}")
+            if self.logger:
+                self.logger.warning(f"WARNING: Adding position would exceed portfolio risk limit: {total_risk:.2%} > {self.max_portfolio_risk_pct:.2%}")
             return False
             
         return True
@@ -425,7 +442,8 @@ class RiskManager:
         # Add a safety check for max percentage of portfolio
         max_budget = portfolio_value * self.max_portfolio_risk_pct
         if component_budget > max_budget:
-            print(f"Limiting component budget to {self.max_portfolio_risk_pct:.2%} of portfolio")
+            if self.logger:
+                self.logger.info(f"Limiting component budget to {self.max_portfolio_risk_pct:.2%} of portfolio")
             component_budget = max_budget
             
         return component_budget
@@ -458,7 +476,8 @@ class RiskManager:
         
         # Ensure we have some exposure on both sides
         if long_exposure <= 0 or short_exposure <= 0:
-            print("Trade is not balanced: Missing exposure on one side")
+            if self.logger:
+                self.logger.warning("Trade is not balanced: Missing exposure on one side")
             return False
             
         # Calculate the ratio
@@ -466,7 +485,8 @@ class RiskManager:
         
         # Check if the ratio is within acceptable limits
         if long_short_ratio > self.max_long_short_ratio:
-            print(f"Trade is not balanced: Long/short ratio {long_short_ratio:.2f} exceeds limit {self.max_long_short_ratio:.2f}")
+            if self.logger:
+                self.logger.warning(f"Trade is not balanced: Long/short ratio {long_short_ratio:.2f} exceeds limit {self.max_long_short_ratio:.2f}")
             return False
             
         return True 

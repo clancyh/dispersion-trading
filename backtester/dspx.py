@@ -3,7 +3,7 @@ import numpy as np
 import os
 from datetime import datetime
 
-def load_dspx_data(data_dir=None):
+def load_dspx_data(data_dir=None, logger=None):
     """
     Load the DSPX (CBOE S&P 500 Dispersion) Index historical data
     
@@ -11,7 +11,9 @@ def load_dspx_data(data_dir=None):
     -----------
     data_dir : str, optional
         Directory containing the DSPX data file. If None, will look in project root.
-    
+    logger : BacktestLogger, optional
+        Logger instance for output messages
+        
     Returns:
     --------
     pandas.DataFrame
@@ -24,9 +26,21 @@ def load_dspx_data(data_dir=None):
     else:
         dspx_file_path = os.path.join(data_dir, 'DSPX_History.csv')
     
+    # Helper function for logging
+    def log_message(level, message):
+        if logger:
+            if level == 'warning':
+                logger.warning(message)
+            elif level == 'info':
+                logger.info(message)
+            elif level == 'error':
+                logger.error(message)
+        else:
+            print(message)
+    
     # Check if file exists
     if not os.path.exists(dspx_file_path):
-        print(f"Warning: DSPX data file not found at {dspx_file_path}")
+        log_message('warning', f"DSPX data file not found at {dspx_file_path}")
         # Return empty DataFrame with expected columns
         return pd.DataFrame(columns=['date', 'DSPX'])
     
@@ -36,7 +50,7 @@ def load_dspx_data(data_dir=None):
         
         # Check if data is empty
         if len(dspx_data) == 0:
-            print(f"Warning: DSPX data file is empty: {dspx_file_path}")
+            log_message('warning', f"DSPX data file is empty: {dspx_file_path}")
             return pd.DataFrame(columns=['date', 'DSPX'])
         
         # Convert date strings to datetime objects
@@ -51,27 +65,27 @@ def load_dspx_data(data_dir=None):
         
         # Make sure DSPX column exists
         if 'DSPX' not in dspx_data.columns:
-            print("Warning: 'DSPX' column not found in data file. Looking for alternatives...")
+            log_message('warning', "DSPX column not found in data file. Looking for alternatives...")
             # Check for possible alternative column names
             index_cols = [col for col in dspx_data.columns if 'close' in col.lower() or 'value' in col.lower()]
             if index_cols:
-                print(f"Using column '{index_cols[0]}' as DSPX value")
+                log_message('info', f"Using column '{index_cols[0]}' as DSPX value")
                 dspx_data = dspx_data.rename(columns={index_cols[0]: 'DSPX'})
             else:
-                print("No suitable column found for DSPX values")
+                log_message('warning', "No suitable column found for DSPX values")
                 return pd.DataFrame(columns=['date', 'DSPX'])
         
         # Sort by date
         dspx_data = dspx_data.sort_values('date')
         
-        print(f"Loaded DSPX data with {len(dspx_data)} entries (dspx.py).")
+        log_message('info', f"Loaded DSPX data with {len(dspx_data)} entries")
         return dspx_data
         
     except Exception as e:
-        print(f"Error loading DSPX data: {str(e)}")
+        log_message('error', f"Error loading DSPX data: {str(e)}")
         return pd.DataFrame(columns=['date', 'DSPX'])
 
-def calculate_dspx_signal(dspx_data, current_date, lookback=30, entry_threshold=1.0, exit_threshold=0.5):
+def calculate_dspx_signal(dspx_data, current_date, entry_threshold=2.0, exit_threshold=1.0, lookback=30):
     """
     Calculate trading signals based on DSPX index
     
@@ -81,19 +95,18 @@ def calculate_dspx_signal(dspx_data, current_date, lookback=30, entry_threshold=
         Dataframe containing DSPX data
     current_date : datetime.date or str
         Current date for signal calculation
-    lookback : int
-        Number of days to look back for calculating moving average
     entry_threshold : float
         Threshold for entry signals (in standard deviations)
     exit_threshold : float
-        Threshold for exit signals (in standard deviations)
+        Threshold for exit signals (in standard deviations)  
+    lookback : int
+        Number of days to look back for calculating moving average
         
     Returns:
     --------
     dict
         Dictionary containing signal information:
-        - signal: Type of signal (ENTER_DISPERSION, ENTER_REVERSE_DISPERSION, EXIT, or None)
-        - action: Action to take based on signal
+        - signal: Type of signal (ENTER_DISPERSION, ENTER_REVERSE_DISPERSION, EXIT, or HOLD)
         - metrics: Dictionary with DSPX value, z-score, and other metrics
     """
     # Convert date format if needed
@@ -120,38 +133,32 @@ def calculate_dspx_signal(dspx_data, current_date, lookback=30, entry_threshold=
     z_score = (current_dspx - dspx_mean) / dspx_std if dspx_std > 0 else 0
     
     # Generate signal based on z-score
-    signal = None
-    action = None
+    signal = 'HOLD'  # Default signal
     
     if z_score > entry_threshold:
         # DSPX is significantly higher than average - positive dispersion
         # Indicates high implied correlation relative to realized correlation
         signal = 'ENTER_DISPERSION'
-        action = 'SELL_INDEX_BUY_COMPONENTS'
     elif z_score < -entry_threshold:
         # DSPX is significantly lower than average - negative dispersion
         # Indicates low implied correlation relative to realized correlation
         signal = 'ENTER_REVERSE_DISPERSION'
-        action = 'BUY_INDEX_SELL_COMPONENTS'
     elif abs(z_score) < exit_threshold:
         # DSPX has reverted to the mean - exit positions
         signal = 'EXIT'
-        action = 'CLOSE_POSITIONS'
     
     # Compile metrics
     metrics = {
         'dspx_value': current_dspx,
         'dspx_mean': dspx_mean,
         'dspx_std': dspx_std,
-        'z_score': z_score
+        'z_score': z_score,
+        'entry_threshold': entry_threshold,
+        'exit_threshold': exit_threshold
     }
     
     # Return signal information
-    if signal:
-        return {
-            'signal': signal,
-            'action': action,
-            'metrics': metrics
-        }
-    else:
-        return None 
+    return {
+        'signal': signal,
+        'metrics': metrics
+    } 

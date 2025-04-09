@@ -1,7 +1,7 @@
 {
   "backtest": {
-    "start_date": "2021-02-01",
-    "end_date": "2021-12-31",
+    "start_date": "2022-11-01",
+    "end_date": "2024-12-31",
     "frequency": "daily"
   },
   "portfolio": {
@@ -14,7 +14,7 @@
     "random_selection": true,
     "num_stocks": 479,
     "seed": 3,
-    "repull_data": false
+    "repull_data": true
   },
   "trading": {
     "commission": {
@@ -60,10 +60,17 @@
     "max_long_short_ratio": 1.1
   },
   "logging": {
-    "level": "info",
+    "level": "error",
+    "debug_mode": true,
     "save_trades": true,
     "save_positions": true,
-    "save_performance": true
+    "save_performance": true,
+    "console_output": {
+      "show_signals": false,
+      "show_trades": false,
+      "performance_update_frequency": 5,
+      "verbose_portfolio_updates": true
+    }
   },
   "paths": {
     "data_dir": "data/processed/",
