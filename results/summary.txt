@@ -1,21 +1,21 @@
 Backtest Summary
 ===============
 
-Start Date: 2019-11-01
-End Date: 2020-12-31
+Start Date: 2024-11-01
+End Date: 2025-04-29
 Initial Capital: $1000000
-Final Capital: $2578561.47
+Final Capital: $1025905.40
 
 Performance Metrics:
-Total Return: 157.86%
-Annualized Return: 91.97%
-Annualized Volatility: 45.90%
-Sharpe Ratio: 2.00
+Total Return: 2.59%
+Annualized Return: 7.28%
+Annualized Volatility: 19.31%
+Sharpe Ratio: 0.38
 Max Drawdown: 0.00%
 
 Risk Management Settings:
-Position Sizing Method: equal_risk
-Max Portfolio Risk: 15.00%
+Position Sizing Method: kelly
+Max Portfolio Risk: 7.50%
 Max Position Risk: 3.00%
 Stop-Loss Level: 10.00%
 Max Drawdown Limit: 15.00%

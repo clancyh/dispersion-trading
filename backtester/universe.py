@@ -115,7 +115,7 @@ def data_exists_for_tickers(tickers, index_ticker, vix=True):
 
 # Calculate extended start date (2 years before backtest start date)
 backtest_start = datetime.strptime(start_date, '%Y-%m-%d')
-extended_start = (backtest_start - timedelta(days=2*365)).strftime('%Y-%m-%d')
+extended_start = (backtest_start - timedelta(days=5*365)).strftime('%Y-%m-%d')
 
 # Check if we need to pull data
 if repull_data:

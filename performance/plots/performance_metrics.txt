@@ -1,0 +1,26 @@
+Overall Performance Metrics (2021-2024):
+Annualized Return: 114.50%
+Annualized Volatility: 45.77%
+Sharpe Ratio: 2.41
+
+Yearly Metrics:
+
+2021:
+Annualized Return: 160.28%
+Annualized Volatility: 40.02%
+Sharpe Ratio: 3.91
+
+2022:
+Annualized Return: 58.47%
+Annualized Volatility: 35.07%
+Sharpe Ratio: 1.55
+
+2023:
+Annualized Return: 239.86%
+Annualized Volatility: 49.58%
+Sharpe Ratio: 4.76
+
+2024 (YTD):
+Annualized Return: 51.36%
+Annualized Volatility: 54.97%
+Sharpe Ratio: 0.86

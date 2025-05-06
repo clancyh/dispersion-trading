@@ -1,7 +1,7 @@
 {
   "backtest": {
-    "start_date": "2019-11-01",
-    "end_date": "2020-12-31",
+    "start_date": "2024-11-01",
+    "end_date": "2025-04-29",
     "frequency": "daily"
   },
   "portfolio": {
@@ -41,18 +41,18 @@
   },
   "dispersion": {
     "entry_threshold": 2,
-    "exit_threshold": 1,
-    "max_position_size": 0.05,
+    "exit_threshold": 1.5,
+    "max_position_size": 0.02,
     "dspx_lookback": 30
   },
   "risk_management": {
-    "max_portfolio_risk_pct": 0.15,
+    "max_portfolio_risk_pct": 0.075,
     "max_position_risk_pct": 0.03,
     "stop_loss_pct": 0.10,
     "max_drawdown_pct": 0.15,
-    "max_options_vega_exposure": 25000,
+    "max_options_vega_exposure": 10000,
     "max_options_theta_per_day": -2500,
-    "position_sizing_method": "equal_risk",
+    "position_sizing_method": "kelly",
     "risk_limits_enabled": true,
     "recovery_days_after_max_drawdown": 10,
     "recovery_percentage": 0.5,

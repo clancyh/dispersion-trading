@@ -20,19 +20,29 @@ dispersion-trading/
 │   ├── options_pricer.py      # Options pricing models
 │   ├── volatility.py          # Volatility calculations
 │   ├── correlation.py         # Correlation calculations
+│   ├── dspx.py                # DSPX index and signal calculations
+│   ├── risk_manager.py        # Risk management logic
+│   ├── logger.py              # Logging utility
 │   ├── weights.py             # Index weight handling
-│   ├── universe.py            # Trading universe definition
+│   ├── universe.py            # Trading universe definition (auxiliary)
 │   └── __init__.py            # Package indicator
 ├── data/                      # Data handling
 │   ├── processed/             # Processed data files (.csv)
 │   └── datagrab.r             # R script for data acquisition
+├── results/                   # Backtest results (CSV reports, plots, summary)
+├── performance/               # Performance related outputs (e.g., tear sheets - if generated)
 ├── testing/                   # Testing scripts
 │   ├── options_test.py        # Tests for options pricing
 │   └── options_test.ipynb     # Interactive notebook tests
-├── config.json                # Configurable parameters
+├── config.json                # Configurable parameters for the backtest
 ├── constituents-sp500.csv     # S&P 500 constituent stocks with weights
+├── DSPX_History.csv           # Historical CBOE S&P 500 Dispersion Index data
 ├── main.py                    # Main script to run the backtest
-└── README.md                  # This file
+├── requirements.txt           # Python dependencies
+├── README.md                  # This file
+├── README_RISK_MANAGEMENT.md  # Detailed guide on risk management features
+├── methodology-cboe-sp-500-dispersion-index.pdf # CBOE DSPX methodology
+└── weights-sp500.csv          # (Potentially alternative or historical S&P 500 weights file)
 ```
 
 ## Dependencies
@@ -41,7 +51,9 @@ dispersion-trading/
 - numpy
 - pandas
 - scipy
-- matplotlib (for visualization)
+- matplotlib
+
+(See `requirements.txt` for specific versions. It is recommended to update `requirements.txt` if these are not listed.)
 
 ### R Dependencies
 - quantmod
@@ -59,6 +71,9 @@ cd dispersion-trading
 2. Install Python dependencies:
 ```bash
 pip install numpy pandas scipy matplotlib
+# It's recommended to use the requirements file:
+# pip install -r requirements.txt 
+# (Ensure requirements.txt is up-to-date with pandas and scipy)
 ```
 
 3. Install R dependencies:
@@ -71,17 +86,31 @@ install.packages(c("quantmod", "xts", "zoo"))
 ### Configuration
 
 The system uses a central `config.json` file for all parameters. You can customize:
-- Backtest date ranges
-- Universe selection criteria
-- Trading parameters
-- Options pricing models
-- Volatility calculation methods
-- Dispersion strategy parameters
+- Backtest date ranges (`backtest` section: `start_date`, `end_date`)
+- Portfolio settings (`portfolio` section: `initial_cash`, `leverage_limit`, `benchmark`)
+- Universe selection criteria (`universe` section: `index`, `num_stocks`, `random_selection`, `seed`)
+- Trading parameters (`trading` section: `commission`, `slippage`, `market_impact`)
+- Options pricing models and parameters (`options` section: `pricing_model`, `risk_free_rate`, `volatility_method`, etc.)
+- Volatility calculation methods (via `options` section and `volatility.py`)
+- Dispersion strategy parameters (`dispersion` section)
+- Risk management rules (`risk_management` section)
+- Logging verbosity and output (`logging` section)
+- Data and results paths (`paths` section)
 
-Important dispersion strategy parameters include:
-- `entry_threshold`: Difference between implied and realized correlation that triggers entry (default: 0.05)
-- `exit_threshold`: Threshold for exiting positions when correlations converge (default: 0.02)
-- `max_position_size`: Maximum portfolio allocation for a trade (default: 0.1 or 10%)
+Key dispersion strategy parameters in `config.json` include:
+- `entry_threshold`: Difference between implied and realized correlation (or DSPX signal) that triggers entry (e.g., default in sample config: 2.0)
+- `exit_threshold`: Threshold for exiting positions when correlations converge (e.g., default in sample config: 1.5)
+- `max_position_size`: Maximum portfolio allocation for a single dispersion trade (e.g., default in sample config: 0.02 or 2%)
+- `dspx_lookback`: Lookback period for DSPX calculations.
+
+The `risk_management` section in `config.json` allows for detailed control over risk, including:
+- `max_portfolio_risk_pct`, `max_position_risk_pct`
+- `stop_loss_pct`, `max_drawdown_pct`
+- `position_sizing_method` (e.g., 'kelly')
+- Vega and Theta limits for options exposure
+For more details, see `README_RISK_MANAGEMENT.md`.
+
+The `logging` section controls console output, debug mode, and whether to save trades/positions history.
 
 ### Data Acquisition
 
@@ -91,59 +120,73 @@ Use the R script to download historical price data:
 Rscript data/datagrab.r SPY,^VIX,AAPL,MSFT 2020-01-01 2024-12-31
 ```
 
-This will download data for the specified symbols from 2020-01-01 to 2024-12-31 and save it to `data/processed/`. Note that including `^VIX` is necessary for implied volatility calculations.
+This will download data for the specified symbols from 2020-01-01 to 2024-12-31 and save it to `data/processed/` (as configured in `config.json`). Note that including `^VIX` is necessary for VIX-based implied volatility calculations. Historical `DSPX_History.csv` data should also be present for strategies utilizing it.
 
 ### Universe Selection
 
-The `universe.py` script handles:
-- Loading S&P 500 constituents
-- Selecting a subset of tickers based on criteria in config.json
-- Fetching historical data for the index, VIX, and selected stocks
+The `BacktestEngine` handles loading data for the index (e.g., SPY), VIX, and selected component stocks based on the `universe` section in `config.json`. It can randomly select from `constituents-sp500.csv` or use a predefined list. The data is sourced from the directory specified in `paths.data_dir` in `config.json`.
 
-```python
-# Example from Python
-from backtester.universe import grab_data
-
-# Download data for specific tickers
-grab_data("SPY,^VIX,AAPL", "2020-01-01", "2024-12-31")
-```
+The `universe.py` script contains auxiliary functions but is not the primary data loading mechanism for the engine.
 
 ### Volatility Calculations
 
-The system supports multiple volatility calculation methods:
+The system supports multiple volatility calculation methods, primarily configured via the `options.volatility_method` in `config.json` for option pricing. Key functions in `backtester.volatility.py`:
 
 ```python
-from backtester.volatility import calculate_historical_volatility, calculate_vix_implied_volatility
+from backtester.volatility import calculate_historical_volatility, calculate_vix_implied_volatility, calculate_implied_volatilities
 
-# Calculate historical volatility
+# Calculate historical volatility (used internally or for custom analysis)
 hist_vol = calculate_historical_volatility("AAPL", "2022-01-10", lookback=30)
 
-# Calculate VIX-scaled implied volatility
-implied_vol = calculate_vix_implied_volatility("AAPL", "2022-01-10", lookback=30)
+# Calculate VIX-scaled implied volatility for a single ticker (used internally or for custom analysis)
+# This method uses VIX data to adjust historical volatility.
+implied_vol_single = calculate_vix_implied_volatility("AAPL", "2022-01-10", lookback=30)
+
+# Calculate VIX-scaled implied volatilities for the index and its components (used by correlation module)
+implied_vols_dict = calculate_implied_volatilities("SPY", ["AAPL", "MSFT"], "2022-01-10", lookback=30)
 ```
 
 ### Correlation Calculations
 
-The system calculates both realized and implied correlations:
+The system calculates correlation dispersion, which is key for generating trading signals. The main function used by the `BacktestEngine` is `calculate_correlation_dispersion` from `backtester.correlation.py`.
 
 ```python
-from backtester.correlation import calculate_realized_correlation, calculate_implied_correlation
+from backtester.correlation import calculate_realized_correlation, calculate_average_realized_correlation, calculate_implied_correlation, calculate_correlation_dispersion
 
-# Calculate realized correlation between components
-realized_corr = calculate_realized_correlation(
+# Calculate realized correlation matrix between components (auxiliary)
+realized_corr_matrix = calculate_realized_correlation(
     ["AAPL", "MSFT", "AMZN"],
     "2022-01-10",
     lookback=30
 )
 
-# Calculate implied correlation between index and components
-implied_corr = calculate_implied_correlation(
+# Calculate average realized correlation (used within dispersion calculation)
+avg_realized_corr = calculate_average_realized_correlation(
+    ["AAPL", "MSFT", "AMZN"],
+    "2022-01-10",
+    lookback=30
+)
+
+# Calculate implied correlation (uses implied volatilities and index weights from weights.py)
+# (used within dispersion calculation)
+implied_corr_value = calculate_implied_correlation(
+    "SPY",
+    ["AAPL", "MSFT", "AMZN"],
+    "2022-01-10",
+    lookback=30
+    # Index weights are loaded internally from constituents-sp500.csv via weights.py
+)
+
+# Calculate correlation dispersion (used by the backtesting engine)
+# Returns a dict with 'implied_correlation', 'realized_correlation', and 'correlation_dispersion'
+dispersion_metrics = calculate_correlation_dispersion(
     "SPY",
     ["AAPL", "MSFT", "AMZN"],
     "2022-01-10",
     lookback=30
 )
 ```
+Index component weights are loaded from `constituents-sp500.csv` via `backtester.weights.py` for accurate implied correlation calculation.
 
 ### Options Pricing
 
@@ -160,7 +203,8 @@ option_price = price_options(
     strike_price=450,
     option_type="call",
     model="black_scholes",
-    volatility_method="vix_implied"  # Use VIX-scaled implied volatility
+    risk_free_rate=0.02,
+    volatility_method="vix_implied"
 )
 
 # Or use custom volatility
@@ -171,7 +215,7 @@ custom_price = price_options(
     strike_price=450,
     option_type="call",
     volatility_method="custom",
-    volatility_value=0.25  # 25% annualized volatility
+    volatility_value=0.25
 )
 
 print(f"Option price: ${option_price:.2f}")
@@ -187,19 +231,23 @@ python main.py
 
 This will:
 1. Load configuration from `config.json`
-2. Initialize the backtesting engine
-3. Run the backtest from start to end date
-4. Calculate and display performance metrics
-5. Save results and plots to the results directory
+2. Initialize the `BacktestLogger` for logging.
+3. Initialize the `RiskManager` with rules from `config.json`.
+4. Initialize the `BacktestEngine`.
+5. Run the backtest from start to end date, applying risk management rules.
+6. Calculate and display performance metrics.
+7. Save detailed results (portfolio history, trade history, summary report) to the `results/` directory (path configurable in `config.json`).
+8. Generate and save plots (e.g., performance chart) to the `results/` directory.
 
 #### Backtesting Engine
 
 The engine processes each trading day by:
-1. Updating the value of existing positions
-2. Checking for expired options and closing those positions
-3. Generating trading signals based on correlation dispersion
-4. Executing trades based on signals
-5. Recording end-of-day portfolio values
+1. Updating the value of existing positions and checking for stop-losses via the `RiskManager`.
+2. Checking for expired options and closing those positions.
+3. Generating trading signals based on correlation dispersion (from `correlation.py`) or potentially DSPX signals (from `dspx.py`), if applicable. Signal generation is subject to `RiskManager` constraints (e.g., if new trades are allowed).
+4. Executing trades based on signals, considering position sizing and risk limits from `RiskManager`.
+5. Recording end-of-day portfolio values and trade details.
+The `BacktestLogger` records activities throughout the backtest.
 
 #### Trading Signals
 
@@ -210,38 +258,42 @@ The dispersion trading system uses two main types of entry signals:
    - Buy component options (pay premium)
    - Used when implied correlation is significantly higher than realized correlation
 
-2. **Reverse Dispersion Trade** (when `dispersion < -entry_threshold`):
+2. **Reverse Dispersion Trade** (when `dispersion < -entry_threshold` or equivalent DSPX signal):
    - Buy index options (pay premium)
    - Sell component options (collect premium)
    - Used when implied correlation is significantly lower than realized correlation
 
 Positions are exited when:
-- The disparity between implied and realized correlation narrows below the exit threshold
+- The disparity between implied and realized correlation (or DSPX signal) narrows below the `exit_threshold`
 - Options reach their expiration date
+- Risk limits defined in `RiskManager` are breached (e.g., stop-loss, max drawdown)
 
 ### Results Analysis
 
-After running a backtest, review the performance metrics and outputs:
+After running `python main.py`, the backtest results are saved in the directory specified by `paths.results_dir` in `config.json` (default is `results/`). This includes:
+- `portfolio_history.csv`: Daily portfolio metrics.
+- `trade_history.csv`: Detailed log of all trades.
+- `summary.txt`: A summary of the backtest configuration and key performance metrics.
+- Plots (e.g., performance chart) generated by `engine.plot_results()`.
+
+You can then load and analyze these files. The `main.py` script already prints key performance metrics to the console.
 
 ```python
-from backtester.engine import BacktestEngine
+# Example of how main.py displays results (actual loading/analysis might use saved files)
 import json
+from backtester.engine import BacktestEngine # For context, not direct re-run here
 
-# Load configuration
-with open('config.json', 'r') as f:
-    config = json.load(f)
+# Assuming results are already generated by running 'python main.py'
+# You would typically load the CSV files from the 'results/' directory with pandas
 
-# Initialize and run the backtest
-engine = BacktestEngine(config)
-results = engine.run()
+# Example metrics that main.py calculates and prints:
+# Total Return, Annualized Return, Annualized Volatility, Sharpe Ratio, Max Drawdown, Final Portfolio Value.
 
-# Review performance metrics
-print(f"Total Return: {results['performance_metrics']['total_return']:.2%}")
-print(f"Sharpe Ratio: {results['performance_metrics']['sharpe_ratio']:.2f}")
-print(f"Max Drawdown: {results['performance_metrics']['max_drawdown']:.2%}")
-
-# Plot results
-engine.plot_results()
+# To re-plot (if needed, main.py does it automatically):
+# with open('config.json', 'r') as f:
+# config = json.load(f)
+# engine = BacktestEngine(config) # This would re-initialize, not ideal for just plotting
+# engine.plot_results() # Typically you'd have a separate script to load and plot saved data
 ```
 
 ## Options Pricing Models
@@ -278,17 +330,23 @@ The historical price data is stored in CSV format with the following columns:
 
 ## Index Weights
 
-The system uses index component weights from `constituents-sp500.csv` for more accurate correlation calculations. The weights are used to:
-- Calculate weighted implied volatility of the index
-- Properly weight components in correlation calculations
-- Generate more accurate dispersion signals
+The system uses index component weights from the `Weight` column in `constituents-sp500.csv` (via `backtester.weights.py`) for more accurate correlation calculations. These weights are used to:
+- Calculate weighted implied volatility of the index.
+- Properly weight components in implied correlation calculations.
+- Generate more accurate dispersion signals.
 
 ## Known Issues and Limitations
 
-- The system requires VIX data for implied volatility calculations
-- Short options positions have theoretically unlimited risk
-- Limited transaction cost modeling
-- No dividends handling in options pricing
+- The system requires VIX data (`^VIX.csv`) for VIX-based implied volatility calculations.
+- DSPX-based strategies require `DSPX_History.csv`.
+- Short options positions have theoretically unlimited risk, though the `RiskManager` provides tools to mitigate this (see `README_RISK_MANAGEMENT.md`).
+- Transaction cost modeling includes basic commission and fixed slippage (configurable in `config.json`). Market impact modeling can be enabled.
+- No dividends handling in the current Black-Scholes and Binomial options pricing models.
+
+## New Features Overview
+- **Advanced Risk Management**: Comprehensive risk controls via `risk_manager.py` and `config.json`, detailed in `README_RISK_MANAGEMENT.md`.
+- **DSPX Integration**: Support for strategies based on the CBOE S&P 500 Dispersion Index (DSPX) via `dspx.py` and `DSPX_History.csv`. See `methodology-cboe-sp-500-dispersion-index.pdf` for background.
+- **Backtest Logging**: Customizable logging of backtest events using `logger.py`.
 
 ## Contributors
 
