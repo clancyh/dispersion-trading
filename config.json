@@ -46,13 +46,13 @@
     "dspx_lookback": 30
   },
   "risk_management": {
-    "max_portfolio_risk_pct": 0.075,
+    "max_portfolio_risk_pct": 0.15,
     "max_position_risk_pct": 0.03,
     "stop_loss_pct": 0.10,
     "max_drawdown_pct": 0.15,
-    "max_options_vega_exposure": 10000,
+    "max_options_vega_exposure": 25000,
     "max_options_theta_per_day": -2500,
-    "position_sizing_method": "kelly",
+    "position_sizing_method": "equal_risk",
     "risk_limits_enabled": true,
     "recovery_days_after_max_drawdown": 10,
     "recovery_percentage": 0.5,
